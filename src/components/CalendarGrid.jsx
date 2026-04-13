@@ -17,11 +17,22 @@ const CalendarGrid = ({ holidays, onToggleHoliday, timetable, currentMonth, setC
   };
 
   return (
-    <div className="calendar-card glass-card">
+    <div className="calendar-card glass-card calendar-shell">
       <div className="calendar-header">
-        <button className="btn-icon" onClick={() => setCurrentMonth(subMonths(currentMonth, 1))}>&lt;</button>
-        <h3>{format(currentMonth, 'MMMM yyyy')}</h3>
-        <button className="btn-icon" onClick={() => setCurrentMonth(addMonths(currentMonth, 1))}>&gt;</button>
+        <div>
+          <span className="section-kicker">Calendar</span>
+          <h3>{format(currentMonth, 'MMMM yyyy')}</h3>
+        </div>
+        <div className="hero-actions">
+          <button className="btn-icon" onClick={() => setCurrentMonth(subMonths(currentMonth, 1))} aria-label="Previous month">&lt;</button>
+          <button className="btn-icon" onClick={() => setCurrentMonth(addMonths(currentMonth, 1))} aria-label="Next month">&gt;</button>
+        </div>
+      </div>
+
+      <div className="calendar-legend" aria-label="Calendar legend">
+        <span className="legend-item"><span className="legend-swatch exam" /> Exam day</span>
+        <span className="legend-item"><span className="legend-swatch holiday" /> Holiday</span>
+        <span className="legend-item"><span className="legend-swatch normal" /> Normal day</span>
       </div>
 
       <div className="calendar-grid">
@@ -39,6 +50,16 @@ const CalendarGrid = ({ holidays, onToggleHoliday, timetable, currentMonth, setC
               key={idx} 
               className={`calendar-day ${!isCurrentMonth ? 'other-month' : ''} ${isHoliday ? 'is-holiday' : ''} ${exam ? 'has-exam' : ''}`}
               onClick={() => isCurrentMonth && onToggleHoliday(dateStr)}
+              role={isCurrentMonth ? 'button' : undefined}
+              tabIndex={isCurrentMonth ? 0 : -1}
+              onKeyDown={(event) => {
+                if (!isCurrentMonth) return;
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onToggleHoliday(dateStr);
+                }
+              }}
+              aria-label={`${format(day, 'EEEE, MMMM d')}${isHoliday ? ', holiday' : ''}${exam ? ', exam scheduled' : ''}`}
             >
               <span className="day-number">{format(day, 'd')}</span>
               {exam && (
@@ -53,7 +74,7 @@ const CalendarGrid = ({ holidays, onToggleHoliday, timetable, currentMonth, setC
         })}
       </div>
       <div className="calendar-footer">
-        <p className="text-muted small">Click any date to toggle it as a Holiday. Sundays are holidays by default.</p>
+        <p className="text-muted small">Click any current-month date to toggle a holiday. Sundays stay highlighted automatically.</p>
       </div>
     </div>
   );

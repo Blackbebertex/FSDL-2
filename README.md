@@ -31,6 +31,14 @@ This project generates a conflict-free university exam timetable using a backtra
 - Calendar highlights exam days and room counts.
 - Files: src/App.jsx, src/components/CalendarGrid.jsx
 
+1. Workspace Persistence and Data Tools
+
+- Browser autosave for exams, rooms, holidays, constraints, and generated timetables.
+- Backup export/import for the full workspace state.
+- Timetable CSV export for sharing or quick spreadsheet review.
+- Searchable exam and room lists with input validation.
+- Files: src/App.jsx, src/App.css
+
 ## Multi-Room Model (v6)
 
 - Each exam can use multiple classrooms simultaneously.
@@ -43,6 +51,8 @@ This project generates a conflict-free university exam timetable using a backtra
 npm install
 npm run dev
 ```
+
+The app now remembers its workspace in the browser, so refreshing the page preserves the current setup unless you use Reset Demo Data.
 
 ## Validation
 
@@ -57,3 +67,5 @@ The test script checks:
 - expected high room usage for 400 students,
 - no same-day room overlap,
 - conflict detector returning zero conflicts.
+
+The UI also supports browser-based smoke testing for tab switching, timetable generation, calendar rendering, and backup import/export flows.

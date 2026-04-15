@@ -1,0 +1,27 @@
+{
+  "key": "examflow",
+  "payload": {
+    "exams": [],
+    "rooms": [],
+    "startDateStr": "2026-05-04",
+    "slots": [],
+    "timetable": null,
+    "constraintConfig": {
+      "checkCapacity": true,
+      "enforceSingleExamPerDay": true,
+      "minGapDays": 2,
+      "enforceFridaySaturdayRule": true,
+      "fridaySaturdayMinGap": 3,
+      "enforceSixtyMarkGap": true,
+      "sixtyMarkMinGap": 3,
+      "preventSameDayStudentConflict": true
+    },
+    "holidays": [],
+    "currentMonth": "2026-05-01T00:00:00.000Z",
+    "theme": "dark",
+    "density": "comfortable",
+    "savedProfiles": [],
+    "auditTrail": [],
+    "version": 1
+  }
+}

@@ -115,6 +115,12 @@
   gap: 20px;
 }
 
+  .btn-primary:active,
+  .btn-secondary:active,
+  .pref-chip:active,
+  .btn-icon:active {
+    transform: translateY(0) scale(0.98);
+  }
 .hero-shell {
   align-items: center;
 }
@@ -184,9 +190,38 @@
   color: var(--text-main);
 }
 
+.pref-chip:focus-visible,
+.btn-primary:focus-visible,
+.btn-secondary:focus-visible,
+.btn-icon:focus-visible,
+.nav-links li:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .pref-chip.is-active {
   background: linear-gradient(120deg, rgba(61, 213, 243, 0.2), rgba(42, 198, 164, 0.24));
   color: var(--text-main);
+}
+
+.btn-primary:active,
+.btn-secondary:active,
+.pref-chip:active,
+.btn-icon:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.btn-secondary,
+.btn-primary,
+.btn-icon,
+.pref-chip,
+.nav-links li,
+.calendar-day,
+.list-item,
+.constraint-item,
+.stat-card,
+.audit-item {
+  will-change: transform, background-color, border-color, box-shadow;
 }
 
 .stats-grid {
@@ -646,6 +681,58 @@
   border-top: 1px solid var(--border);
 }
 
+.schedule-status {
+  min-width: 260px;
+  max-width: 360px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 11px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.12);
+}
+
+.schedule-status strong {
+  display: block;
+  font-size: 0.92rem;
+  margin-bottom: 2px;
+}
+
+.schedule-status p {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.schedule-status.is-fresh {
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.schedule-status.is-stale {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.status-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  margin-top: 5px;
+  background: var(--accent);
+  box-shadow: 0 0 0 6px rgba(36, 213, 140, 0.12);
+  animation: statusPulse 1.8s ease-in-out infinite;
+}
+
+.schedule-status.is-stale .status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.16);
+}
+
+.schedule-banner {
+  animation: fadeIn 0.4s ease both;
+}
+
 .grid-container {
   padding: 0;
   overflow: hidden;
@@ -772,6 +859,19 @@
   animation-delay: calc(var(--stagger-index, 0) * 75ms);
 }
 
+@keyframes statusPulse {
+  0%,
+  100% {
+    transform: scale(0.95);
+    opacity: 0.85;
+  }
+
+  50% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
@@ -853,6 +953,10 @@
 
 .density-compact .calendar-day {
   min-height: 70px;
+}
+
+.density-compact .schedule-status {
+  min-width: 220px;
 }
 
 .density-compact .timetable-table th,

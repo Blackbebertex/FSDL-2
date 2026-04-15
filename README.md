@@ -1,71 +1,56 @@
-# Automated Exam Timetable Generator
+# ExamFlow MERN Timetable App
 
-This project generates a conflict-free university exam timetable using a backtracking engine with multi-room distribution support.
+ExamFlow is now a full-stack MERN project built with React, Node.js, Express, and MongoDB. The React UI manages exams, rooms, holidays, profiles, and timetable generation. The backend persists the full workspace in MongoDB and exposes API endpoints for loading, saving, and generating timetables.
 
-## Faculty Requirement Coverage
+## Stack
 
-1. Input and Constraint Builder
+- React 19 + Vite
+- Node.js + Express 5
+- MongoDB + Mongoose
+- date-fns for slot and calendar logic
 
-- UI for adding/removing exams and rooms.
-- Session start date and holiday selection.
-- Explicit constraint builder with toggles and numeric inputs.
-- File: src/App.jsx
+## Setup
 
-1. Backtracking Scheduling Engine
-
-- Recursive exam-slot assignment.
-- Multi-room allocation per exam in the same slot.
-- Capacity-aware room grouping.
-- File: src/utils/scheduler.js
-
-1. Conflict Detection Module
-
-- Dedicated conflict checker for room overlaps, student overlaps, capacity shortages, and rule violations.
-- Used by scheduler and UI status panel.
-- File: src/utils/conflictDetector.js
-
-1. Timetable Visualization
-
-- Interactive visualizer table.
-- Room chips, seat usage metadata, and conflict-status card.
-- Calendar highlights exam days and room counts.
-- Files: src/App.jsx, src/components/CalendarGrid.jsx
-
-1. Workspace Persistence and Data Tools
-
-- Browser autosave for exams, rooms, holidays, constraints, and generated timetables.
-- Backup export/import for the full workspace state.
-- Timetable CSV export for sharing or quick spreadsheet review.
-- Searchable exam and room lists with input validation.
-- Files: src/App.jsx, src/App.css
-
-## Multi-Room Model (v6)
-
-- Each exam can use multiple classrooms simultaneously.
-- Rooms are picked until combined capacity meets student count.
-- With 12 rooms of capacity 35, a 400-student exam uses all 12 rooms.
-
-## Run
+1. Install dependencies.
 
 ```bash
 npm install
+```
+
+1. Create a `.env` file from `.env.example` and update the MongoDB connection if needed.
+
+```bash
+PORT=3001
+MONGODB_URI=mongodb://127.0.0.1:27017/examflow
+VITE_API_URL=http://localhost:3001/api
+```
+
+1. Start MongoDB locally, or point `MONGODB_URI` at your cloud cluster.
+
+1. Run the app in development mode.
+
+```bash
 npm run dev
 ```
 
-The app now remembers its workspace in the browser, so refreshing the page preserves the current setup unless you use Reset Demo Data.
+This starts the Vite client and the Express API together.
 
-## Validation
+## Scripts
 
-```bash
-npm run build
-node test_scheduler.js
-```
+- `npm run dev` starts client and server together.
+- `npm run dev:client` starts only the Vite frontend.
+- `npm run dev:server` starts only the Express API with watch mode.
+- `npm run build` produces the production frontend bundle.
+- `npm start` runs the production Express server.
 
-The test script checks:
+## API
 
-- timetable generation success,
-- expected high room usage for 400 students,
-- no same-day room overlap,
-- conflict detector returning zero conflicts.
+- `GET /api/health` checks the server.
+- `GET /api/workspace` loads the saved MongoDB workspace.
+- `PUT /api/workspace` saves the full workspace.
+- `POST /api/workspace/generate` generates and stores a timetable.
 
-The UI also supports browser-based smoke testing for tab switching, timetable generation, calendar rendering, and backup import/export flows.
+## Notes
+
+- If MongoDB is unavailable, the React app still falls back to browser storage for local work.
+- The workspace payload now includes exams, rooms, slots, timetable, constraints, holidays, theme, density, saved profiles, and audit history.

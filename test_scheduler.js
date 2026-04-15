@@ -1,5 +1,5 @@
-import { generateTimetable } from './src/utils/scheduler.js';
-import { detectConflicts } from './src/utils/conflictDetector.js';
+import { generateTimetable } from './shared/scheduler.js';
+import { detectConflicts } from './shared/conflictDetector.js';
 import { format, differenceInCalendarDays } from 'date-fns';
 
 const MOCK_STUDENTS = Array.from({ length: 400 }, (_, idx) => `Student ${String(idx + 1).padStart(3, '0')}`);

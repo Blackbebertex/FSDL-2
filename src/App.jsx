@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { generateTimetable } from './utils/scheduler';
-import { detectConflicts } from './utils/conflictDetector';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { generateTimetable } from '../shared/scheduler.js';
+import { detectConflicts } from '../shared/conflictDetector.js';
 import CalendarGrid from './components/CalendarGrid';
+import { generateWorkspaceTimetable, loadWorkspace, saveWorkspace } from './services/workspaceApi';
 import './App.css';
 
 const MOCK_STUDENTS = Array.from({ length: 400 }, (_, idx) => `Student ${String(idx + 1).padStart(3, '0')}`);
@@ -123,7 +124,7 @@ const cloneDefaultRooms = () => INITIAL_ROOMS.map(room => ({ ...room }));
 
 const cloneDefaultConstraints = () => ({ ...DEFAULT_CONSTRAINTS });
 
-const buildExportPayload = ({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth }) => ({
+const buildExportPayload = ({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth, theme, density, savedProfiles, auditTrail }) => ({
   exams,
   rooms,
   startDateStr,
@@ -132,6 +133,10 @@ const buildExportPayload = ({ exams, rooms, startDateStr, slots, timetable, cons
   constraintConfig,
   holidays,
   currentMonth: currentMonth.toISOString(),
+  theme,
+  density,
+  savedProfiles,
+  auditTrail,
   exportedAt: new Date().toISOString(),
 });
 
@@ -154,7 +159,6 @@ const downloadTextFile = (filename, content, mimeType) => {
 
 function App() {
   const importInputRef = useRef(null);
-  const hasMountedRef = useRef(false);
 
   const [exams, setExams] = useState(() => readStoredValue('examflow.exams', cloneDefaultExams()));
   const [rooms, setRooms] = useState(() => readStoredValue('examflow.rooms', cloneDefaultRooms()));
@@ -166,14 +170,11 @@ function App() {
   const [error, setError] = useState(null);
   const [feedback, setFeedback] = useState(null);
   const [constraintConfig, setConstraintConfig] = useState(() => readStoredValue('examflow.constraints', cloneDefaultConstraints()));
+  const [isTimetableStale, setIsTimetableStale] = useState(false);
+  const [staleReason, setStaleReason] = useState('');
 
   useEffect(() => {
     setSlots(generateSlots(startDateStr));
-    if (hasMountedRef.current) {
-      setTimetable(null);
-    } else {
-      hasMountedRef.current = true;
-    }
   }, [startDateStr]);
 
   const [holidays, setHolidays] = useState(() => readStoredValue('examflow.holidays', []));
@@ -193,6 +194,8 @@ function App() {
   const [auditTrail, setAuditTrail] = useState(() => readStoredValue(AUDIT_STORAGE_KEY, []));
   const [theme, setTheme] = useState(() => readStoredValue(THEME_STORAGE_KEY, getDefaultTheme()));
   const [density, setDensity] = useState(() => readStoredValue(DENSITY_STORAGE_KEY, 'comfortable'));
+  const [apiStatus, setApiStatus] = useState('connecting');
+  const [isWorkspaceLoaded, setIsWorkspaceLoaded] = useState(false);
 
   useEffect(() => {
     saveStoredValue('examflow.exams', exams);
@@ -263,28 +266,51 @@ function App() {
     ));
   }, [roomSearch, rooms]);
 
-  const clearSchedule = () => {
-    setTimetable(null);
+  const markTimetableStale = (reason) => {
+    if (timetable) {
+      setIsTimetableStale(true);
+      setStaleReason(reason);
+    }
+
     setError(null);
   };
 
-  const pushAuditEvent = (event, details) => {
+  const handleStartDateChange = (value) => {
+    setStartDateStr(value);
+
+    if (timetable) {
+      setIsTimetableStale(true);
+      setStaleReason('Session date updated');
+    }
+  };
+
+  const resetTimetableState = () => {
+    setTimetable(null);
+    setIsTimetableStale(false);
+    setStaleReason('');
+    setError(null);
+  };
+
+  const pushAuditEvent = useCallback((event, details) => {
     setAuditTrail(prev => [{
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       timestamp: new Date().toISOString(),
       event,
       details,
     }, ...prev].slice(0, MAX_AUDIT_EVENTS));
-  };
+  }, []);
 
-  const applyWorkspacePayload = (payload, sourceLabel = 'workspace') => {
+  const applyWorkspacePayload = useCallback((payload, sourceLabel = 'workspace') => {
     if (!payload || typeof payload !== 'object') {
       throw new Error('Invalid workspace payload.');
     }
 
+    skipTimetableResetRef.current = true;
+
     if (Array.isArray(payload.exams)) setExams(payload.exams);
     if (Array.isArray(payload.rooms)) setRooms(payload.rooms);
     if (typeof payload.startDateStr === 'string') setStartDateStr(payload.startDateStr);
+    if (Array.isArray(payload.slots)) setSlots(payload.slots);
     if (Array.isArray(payload.holidays)) setHolidays(payload.holidays);
     if (payload.constraintConfig && typeof payload.constraintConfig === 'object') {
       setConstraintConfig({ ...DEFAULT_CONSTRAINTS, ...payload.constraintConfig });
@@ -292,14 +318,78 @@ function App() {
     if (payload.currentMonth) {
       setCurrentMonth(new Date(payload.currentMonth));
     }
+    if (typeof payload.theme === 'string') setTheme(payload.theme);
+    if (typeof payload.density === 'string') setDensity(payload.density);
+    if (Array.isArray(payload.savedProfiles)) setSavedProfiles(payload.savedProfiles);
+    if (Array.isArray(payload.auditTrail)) setAuditTrail(payload.auditTrail);
     setTimetable(Array.isArray(payload.timetable) ? payload.timetable : null);
+    setIsTimetableStale(false);
+    setStaleReason('');
     setActiveTab(Array.isArray(payload.timetable) ? 'output' : 'input');
     pushAuditEvent('workspace-loaded', `Loaded from ${sourceLabel}`);
-  };
+  }, [pushAuditEvent]);
+
+  const workspaceSnapshot = useMemo(() => buildExportPayload({
+    exams,
+    rooms,
+    startDateStr,
+    slots,
+    timetable,
+    constraintConfig,
+    holidays,
+    currentMonth,
+    theme,
+    density,
+    savedProfiles,
+    auditTrail,
+  }), [auditTrail, constraintConfig, currentMonth, density, exams, holidays, rooms, savedProfiles, slots, startDateStr, theme, timetable]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const hydrateWorkspace = async () => {
+      try {
+        const response = await loadWorkspace();
+        if (isCancelled) return;
+
+        const payload = response.workspace?.payload || response.workspace || response.payload || response;
+        applyWorkspacePayload(payload, 'MongoDB');
+        setApiStatus('online');
+      } catch {
+        if (!isCancelled) {
+          setApiStatus('offline');
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsWorkspaceLoaded(true);
+        }
+      }
+    };
+
+    hydrateWorkspace();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [applyWorkspacePayload]);
+
+  useEffect(() => {
+    if (!isWorkspaceLoaded) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      saveWorkspace(workspaceSnapshot).catch(() => {
+        setApiStatus('offline');
+      });
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [isWorkspaceLoaded, workspaceSnapshot]);
 
   const toggleHoliday = (dateStr) => {
     setHolidays(prev => (prev.includes(dateStr) ? prev.filter(d => d !== dateStr) : [...prev, dateStr]));
-    clearSchedule();
+    markTimetableStale('Holiday selection changed');
     pushAuditEvent('holiday-toggled', dateStr);
   };
 
@@ -330,8 +420,8 @@ function App() {
     };
     setExams([...exams, newExam]);
     setNewExamName('');
-    clearSchedule();
-    setFeedback({ type: 'success', text: 'Exam added and timetable cleared for regeneration.' });
+    markTimetableStale('Exam list changed');
+    setFeedback({ type: 'success', text: 'Exam added. Regenerate to refresh the timetable.' });
     pushAuditEvent('exam-added', cleanedName);
   };
 
@@ -362,33 +452,33 @@ function App() {
     setRooms([...rooms, newRoom]);
     setNewRoomName('');
     setNewRoomCap(35);
-    clearSchedule();
-    setFeedback({ type: 'success', text: 'Room added and timetable cleared for regeneration.' });
+    markTimetableStale('Room list changed');
+    setFeedback({ type: 'success', text: 'Room added. Regenerate to refresh the timetable.' });
     pushAuditEvent('room-added', cleanedName);
   };
 
   const removeExam = (id) => {
     const removed = exams.find(e => e.id === id);
     setExams(exams.filter(e => e.id !== id));
-    clearSchedule();
+    markTimetableStale('Exam removed');
     if (removed) pushAuditEvent('exam-removed', removed.name);
   };
 
   const removeRoom = (id) => {
     const removed = rooms.find(r => r.id === id);
     setRooms(rooms.filter(r => r.id !== id));
-    clearSchedule();
+    markTimetableStale('Room removed');
     if (removed) pushAuditEvent('room-removed', removed.name);
   };
 
   const updateConstraint = (key, value) => {
     setConstraintConfig(prev => ({ ...prev, [key]: value }));
-    clearSchedule();
+    markTimetableStale('Constraint settings changed');
   };
 
   const handleExportBackup = () => {
-    const payload = buildExportPayload({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth });
-    downloadTextFile(`examflow-backup-${startDateStr}.json`, JSON.stringify(payload, null, 2), 'application/json');
+    const payload = buildExportPayload({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth, theme, density, savedProfiles, auditTrail });
+    downloadTextFile(`exam-cell-backup-${startDateStr}.json`, JSON.stringify(payload, null, 2), 'application/json');
     setFeedback({ type: 'success', text: 'Backup exported successfully.' });
     pushAuditEvent('backup-exported', `Backup for ${startDateStr}`);
   };
@@ -411,7 +501,7 @@ function App() {
       ].map(csvEscape).join(',')),
     ];
 
-    downloadTextFile(`examflow-timetable-${startDateStr}.csv`, rows.join('\n'), 'text/csv');
+    downloadTextFile(`exam-cell-timetable-${startDateStr}.csv`, rows.join('\n'), 'text/csv');
     setFeedback({ type: 'success', text: 'Timetable CSV exported successfully.' });
     pushAuditEvent('csv-exported', `Rows: ${timetable.length}`);
   };
@@ -432,7 +522,7 @@ function App() {
       applyWorkspacePayload(parsed, `file: ${file.name}`);
       setFeedback({ type: 'success', text: 'Backup imported successfully.' });
     } catch {
-      setFeedback({ type: 'error', text: 'The selected file is not a valid ExamFlow backup.' });
+      setFeedback({ type: 'error', text: 'The selected file is not a valid Exam Cell backup.' });
     } finally {
       event.target.value = '';
     }
@@ -445,7 +535,7 @@ function App() {
       return;
     }
 
-    const payload = buildExportPayload({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth });
+    const payload = buildExportPayload({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth, theme, density, savedProfiles, auditTrail });
     const profile = { name, updatedAt: new Date().toISOString(), payload };
 
     setSavedProfiles(prev => {
@@ -489,7 +579,7 @@ function App() {
     setRooms(cloneDefaultRooms());
     setStartDateStr(DEFAULT_START_DATE);
     setSlots(generateSlots(DEFAULT_START_DATE));
-    setTimetable(null);
+    resetTimetableState();
     setHolidays([]);
     setCurrentMonth(new Date(DEFAULT_MONTH));
     setConstraintConfig(cloneDefaultConstraints());
@@ -528,27 +618,48 @@ function App() {
     ];
   }, [exams, filteredExams.length, rooms, holidays.length, timetable]);
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     setIsGenerating(true);
     setError(null);
     setFeedback(null);
-    
-    setTimeout(() => {
-      const result = generateTimetable(exams, rooms, slots, { 
-        ...constraintConfig,
-        holidays: holidays 
-      });
+
+    try {
+      const response = await generateWorkspaceTimetable(workspaceSnapshot);
+      const result = response.timetable || response.workspace?.payload?.timetable || null;
+
       if (result) {
         setTimetable(result);
+        setIsTimetableStale(false);
+        setStaleReason('');
         setActiveTab('output');
-        setFeedback({ type: 'success', text: 'Timetable generated successfully.' });
+        setFeedback({ type: 'success', text: 'Timetable generated and saved to MongoDB.' });
         pushAuditEvent('timetable-generated', `Assignments: ${result.length}`);
+        setApiStatus('online');
+        return;
+      }
+
+      throw new Error('Server did not return a timetable.');
+    } catch {
+      const result = generateTimetable(exams, rooms, slots, {
+        ...constraintConfig,
+        holidays,
+      });
+
+      if (result) {
+        setTimetable(result);
+        setIsTimetableStale(false);
+        setStaleReason('');
+        setActiveTab('output');
+        setFeedback({ type: 'success', text: 'Timetable generated locally and will sync when the backend is available.' });
+        pushAuditEvent('timetable-generated', `Assignments: ${result.length}`);
+        setApiStatus('offline');
       } else {
         setError('Could not generate a conflict-free timetable. Try adding more rooms or adjusting gaps.');
         pushAuditEvent('timetable-failed', 'Generation failed with current constraints');
       }
+    } finally {
       setIsGenerating(false);
-    }, 1500);
+    }
   };
 
   return (
@@ -556,7 +667,7 @@ function App() {
       <nav className="sidebar glass-card">
         <div className="logo">
           <span className="icon">📅</span>
-          <h1>ExamFlow</h1>
+          <h1>Exam Cell</h1>
         </div>
         <ul className="nav-links">
           <li className={activeTab === 'input' ? 'active' : ''} onClick={() => setActiveTab('input')}>
@@ -579,16 +690,26 @@ function App() {
       <main className="content">
         <header className="top-bar hero-shell">
           <div className="header-info">
-            <span className="eyebrow">ExamFlow scheduler</span>
+            <span className="eyebrow">Exam Cell scheduler</span>
             <h2>{activeTab === 'input' ? 'Configuration' : activeTab === 'calendar' ? 'Holiday Management' : 'Generated Timetable'}</h2>
             <p className="text-muted hero-copy">Automated backtracking scheduler with room grouping, holiday control, and browser-backed workspace storage.</p>
+            <p className="text-muted small">Backend status: {apiStatus === 'online' ? 'MongoDB connected' : apiStatus === 'connecting' ? 'Connecting to MongoDB...' : 'Local fallback active'}</p>
           </div>
           <div className="hero-actions-wrap">
+            {timetable && (
+              <div className={`schedule-status ${isTimetableStale ? 'is-stale' : 'is-fresh'}`}>
+                <span className="status-dot" />
+                <div>
+                  <strong>{isTimetableStale ? 'Timetable needs regeneration' : 'Timetable ready'}</strong>
+                  <p>{isTimetableStale ? staleReason : 'The current timetable matches the active setup.'}</p>
+                </div>
+              </div>
+            )}
             <div className="hero-actions">
               <button className="btn-secondary" onClick={() => setActiveTab('input')}>Setup</button>
               <button className="btn-secondary" onClick={() => setActiveTab('calendar')}>Calendar</button>
               <button className="btn-primary" onClick={handleGenerate} disabled={isGenerating}>
-                {isGenerating ? 'Generating...' : 'Run Engine'}
+                {isGenerating ? 'Generating...' : isTimetableStale ? 'Regenerate Timetable' : 'Run Engine'}
               </button>
             </div>
             <div className="pref-controls" aria-label="Visual preferences">
@@ -648,6 +769,12 @@ function App() {
           </div>
         )}
 
+        {timetable && isTimetableStale && (
+          <div className="notice-banner notice-info schedule-banner">
+            <span>The timetable is still visible, but it is out of date. Regenerate it after reviewing your edits.</span>
+          </div>
+        )}
+
         {activeTab === 'input' && (
           <section className="input-grid">
             <div className="card glass-card span-full session-config">
@@ -656,7 +783,7 @@ function App() {
                   <span className="section-kicker">Plan</span>
                   <h3>Session Configuration</h3>
                 </div>
-                <p className="text-muted small">Start date drives slot generation and automatically resets the current timetable.</p>
+                <p className="text-muted small">Start date drives slot generation and marks the existing timetable as stale.</p>
               </div>
               <div className="add-form">
                 <div className="input-group">
@@ -664,7 +791,7 @@ function App() {
                   <input 
                     type="date" 
                     value={startDateStr} 
-                    onChange={(e) => setStartDateStr(e.target.value)}
+                    onChange={(e) => handleStartDateChange(e.target.value)}
                   />
                 </div>
               </div>
@@ -689,7 +816,7 @@ function App() {
                   type="file"
                   accept="application/json"
                   onChange={handleImportBackup}
-                  aria-label="Import ExamFlow backup"
+                  aria-label="Import Exam Cell backup"
                 />
               </div>
 

@@ -200,3 +200,32 @@ h1, h2, h3 {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+/* Design System Utilities */
+.display-grid { display: grid; }
+.display-flex { display: flex; }
+.flex-column { flex-direction: column; }
+.flex-row { flex-direction: row; }
+.flex-wrap { flex-wrap: wrap; }
+.align-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.gap-1 { gap: var(--space-1); }
+.gap-2 { gap: var(--space-2); }
+.gap-3 { gap: var(--space-3); }
+.gap-4 { gap: var(--space-4); }
+
+.w-full { width: 100%; }
+.max-w-xs { max-width: 320px; }
+.max-w-sm { max-width: 440px; }
+.max-w-md { max-width: 520px; }
+.mx-auto { margin-left: auto; margin-right: auto; }
+.mt-10 { margin-top: 10px; }
+.mt-20 { margin-top: 20px; }
+
+.modal-dialog-sm { max-width: 440px; }
+.modal-dialog-md { max-width: 600px; }
+.modal-dialog-lg { max-width: 800px; }
+
+.density-comfortable { --space-factor: 1; }
+.density-compact { --space-factor: 0.7; }
+

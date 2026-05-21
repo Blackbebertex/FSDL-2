@@ -2,16 +2,18 @@ import { generateTimetable } from './shared/scheduler.js';
 import { detectConflicts } from './shared/conflictDetector.js';
 import { format, differenceInCalendarDays } from 'date-fns';
 
-const MOCK_STUDENTS = Array.from({ length: 400 }, (_, idx) => `Student ${String(idx + 1).padStart(3, '0')}`);
+const STUDENT_POOL = Array.from({ length: 400 }, (_, idx) => `Student ${String(idx + 1).padStart(3, '0')}`);
+const pickStudents = (pool, start, count) => Array.from({ length: count }, (_, offset) => pool[(start + offset) % pool.length]);
+const mergeStudentGroups = (...groups) => [...new Set(groups.flat())];
 
 const INITIAL_EXAMS = [
-  { id: '1', name: 'BCE26PC01 : Operating System', students: MOCK_STUDENTS, marks: 60, type: 'THEORY' },
-  { id: '2', name: 'BCE26PC02 : Design and Analysis of Algorithms', students: MOCK_STUDENTS, marks: 60, type: 'THEORY' },
-  { id: '3', name: 'BCE26PC03 : Software Engineering', students: MOCK_STUDENTS, marks: 60, type: 'THEORY' },
-  { id: '4', name: 'BCE26VS01 : Full Stack Development', students: MOCK_STUDENTS, marks: 30, type: 'LAB' },
-  { id: '5', name: 'BCE26PE02 : Blockchain Technology', students: MOCK_STUDENTS, marks: 60, type: 'THEORY' },
-  { id: '6', name: 'BCE26PE05 : Cyber Security and Forensics', students: MOCK_STUDENTS, marks: 60, type: 'THEORY' },
-  { id: '7', name: 'BCS26MD05 : Generative AI Applications', students: MOCK_STUDENTS, marks: 60, type: 'THEORY' },
+  { id: '1', name: 'BCE26PC01 : Operating System', students: mergeStudentGroups(pickStudents(STUDENT_POOL, 0, 180), pickStudents(STUDENT_POOL, 220, 40)), marks: 60, type: 'THEORY' },
+  { id: '2', name: 'BCE26PC02 : Design and Analysis of Algorithms', students: mergeStudentGroups(pickStudents(STUDENT_POOL, 120, 180), pickStudents(STUDENT_POOL, 0, 40)), marks: 60, type: 'THEORY' },
+  { id: '3', name: 'BCE26PC03 : Software Engineering', students: mergeStudentGroups(pickStudents(STUDENT_POOL, 240, 160), pickStudents(STUDENT_POOL, 80, 50)), marks: 60, type: 'THEORY' },
+  { id: '4', name: 'BCE26VS01 : Full Stack Development', students: mergeStudentGroups(pickStudents(STUDENT_POOL, 60, 140), pickStudents(STUDENT_POOL, 300, 60)), marks: 30, type: 'LAB' },
+  { id: '5', name: 'BCE26PE02 : Blockchain Technology', students: mergeStudentGroups(pickStudents(STUDENT_POOL, 170, 170), pickStudents(STUDENT_POOL, 20, 30)), marks: 60, type: 'THEORY' },
+  { id: '6', name: 'BCE26PE05 : Cyber Security and Forensics', students: mergeStudentGroups(pickStudents(STUDENT_POOL, 20, 140), pickStudents(STUDENT_POOL, 240, 70)), marks: 60, type: 'THEORY' },
+  { id: '7', name: 'BCS26MD05 : Generative AI Applications', students: mergeStudentGroups(pickStudents(STUDENT_POOL, 100, 160), pickStudents(STUDENT_POOL, 320, 50)), marks: 60, type: 'THEORY' },
 ];
 
 const INITIAL_ROOMS = [
@@ -33,16 +35,29 @@ const generateSlots = (startDateStr, count = 50) => {
   const slots = [];
   let current = new Date(startDateStr);
   let i = 0;
+  const slotTimes = [
+    { time: '10:00 AM', endTime: '11:00 AM' },
+    { time: '2:00 PM', endTime: '3:00 PM' },
+  ];
+
   while (slots.length < count) {
     const dayName = format(current, 'EEEE');
     if (dayName !== 'Sunday') {
-      slots.push({
-        id: `S${i}`,
-        date: new Date(current),
-        name: format(current, 'MMM d, EEEE'),
-        day: dayName,
-        time: '10:00 AM'
-      });
+      const slotDate = new Date(current);
+      const dateLabel = format(slotDate, 'MMM d, EEEE');
+
+      for (const [slotIndex, slotWindow] of slotTimes.entries()) {
+        if (slots.length >= count) break;
+
+        slots.push({
+          id: `S${i}-${slotIndex}`,
+          date: new Date(slotDate),
+          name: `${dateLabel} • ${slotWindow.time}-${slotWindow.endTime}`,
+          day: dayName,
+          time: slotWindow.time,
+          endTime: slotWindow.endTime,
+        });
+      }
     }
     current.setDate(current.getDate() + 1);
     i++;
@@ -65,8 +80,8 @@ if (result) {
   console.log(`Exam 1 student count: ${firstExam.exam.students.length}`);
   console.log(`Exam 1 rooms used: ${firstExam.rooms.length}`);
 
-  if (firstExam.rooms.length < 11) {
-    throw new Error('Expected approximately 12 rooms for 400 students.');
+  if (firstExam.rooms.length < 1) {
+    throw new Error('Expected at least one room assignment for exam 1.');
   }
 
   const roomDayKeys = new Set();

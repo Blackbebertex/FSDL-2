@@ -1,69 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { generateTimetable } from '../shared/scheduler.js';
-import { detectConflicts } from '../shared/conflictDetector.js';
-import CalendarGrid from './components/CalendarGrid';
-import { generateWorkspaceTimetable, loadWorkspace, saveWorkspace } from './services/workspaceApi';
+import {
+  createWorkspace,
+  deleteWorkspace,
+  fetchCurrentUser,
+  fetchWorkspaceReports,
+  generateWorkspaceTimetable,
+  getSharedWorkspace,
+  listWorkspaces,
+  loadWorkspace,
+  login,
+  logout,
+  saveWorkspace,
+  setWorkspaceShare,
+  updateWorkspaceMeta,
+} from './services/workspaceApi';
+import ModalDialog from './components/ModalDialog';
+import ListBlock from './components/ListBlock';
+import PinLockEntry from './components/PinLockEntry';
+import SyllabusUpload from './components/SyllabusUpload';
 import './App.css';
-
-const MOCK_STUDENTS = Array.from({ length: 400 }, (_, idx) => `Student ${String(idx + 1).padStart(3, '0')}`);
-
-const INITIAL_EXAMS = [
-  { id: '1', name: 'BCE26PC01 : Operating System', students: MOCK_STUDENTS, marks: 30, type: 'THEORY' },
-  { id: '2', name: 'BCE26PC02 : Design and Analysis of Algorithms', students: MOCK_STUDENTS, marks: 30, type: 'THEORY' },
-  { id: '3', name: 'BCE26PC03 : Software Engineering', students: MOCK_STUDENTS, marks: 30, type: 'THEORY' },
-  { id: '4', name: 'BCE26VS01 : Full Stack Development', students: MOCK_STUDENTS, marks: 30, type: 'LAB' },
-  { id: '5', name: 'BCE26PE02 : Blockchain Technology', students: MOCK_STUDENTS, marks: 30, type: 'THEORY' },
-  { id: '6', name: 'BCE26PE05 : Cyber Security and Forensics', students: MOCK_STUDENTS, marks: 30, type: 'THEORY' },
-  { id: '7', name: 'BCS26MD05 : Generative AI Applications', students: MOCK_STUDENTS, marks: 30, type: 'THEORY' },
-];
-
-const INITIAL_ROOMS = [
-  { id: 'R1', name: '6201', capacity: 35 },
-  { id: 'R2', name: '6202', capacity: 35 },
-  { id: 'R3', name: '6204', capacity: 35 },
-  { id: 'R4', name: '6205', capacity: 35 },
-  { id: 'R5', name: '6102', capacity: 35 },
-  { id: 'R6', name: '6103', capacity: 35 },
-  { id: 'R7', name: '6301', capacity: 35 },
-  { id: 'R8', name: '6302', capacity: 35 },
-  { id: 'R9', name: '6304', capacity: 35 },
-  { id: 'R10', name: '6305', capacity: 35 },
-  { id: 'R11', name: '6402', capacity: 35 },
-  { id: 'R12', name: '6403', capacity: 35 },
-];
-
-const generateSlots = (startDateStr, count = 30) => {
-  const slots = [];
-  let current = new Date(startDateStr);
-  let i = 0;
-  while (slots.length < count) {
-    const dayName = current.toLocaleDateString('en-US', { weekday: 'long' });
-    if (dayName !== 'Sunday') {
-      slots.push({
-        id: `S${i}`,
-        date: new Date(current),
-        name: current.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' }),
-        day: dayName,
-        time: '10:00 AM'
-      });
-    }
-    current.setDate(current.getDate() + 1);
-    i++;
-  }
-  return slots;
-};
-
-const DEFAULT_START_DATE = '2026-05-04';
-const DEFAULT_MONTH = '2026-05-01';
-const THEME_STORAGE_KEY = 'examflow.theme';
-const DENSITY_STORAGE_KEY = 'examflow.density';
-const PROFILE_STORAGE_KEY = 'examflow.profiles';
-const AUDIT_STORAGE_KEY = 'examflow.audit';
-const MAX_AUDIT_EVENTS = 120;
 
 const DEFAULT_CONSTRAINTS = {
   checkCapacity: true,
-  enforceSingleExamPerDay: true,
+  enforceSingleExamPerDay: false,
   minGapDays: 2,
   enforceFridaySaturdayRule: true,
   fridaySaturdayMinGap: 3,
@@ -72,1073 +31,1195 @@ const DEFAULT_CONSTRAINTS = {
   preventSameDayStudentConflict: true,
 };
 
-const readStoredValue = (key, fallback) => {
-  if (typeof window === 'undefined') {
-    return fallback;
-  }
-
-  try {
-    const storedValue = window.localStorage.getItem(key);
-    return storedValue ? JSON.parse(storedValue) : fallback;
-  } catch {
-    return fallback;
-  }
+const DEFAULT_SESSION_CONFIG = {
+  startDate: '2026-05-04',
+  endDate: '2026-05-30',
+  slotsPerDay: 2,
+  timeWindows: [
+    { startTime: '10:00 AM', endTime: '12:00 PM' },
+    { startTime: '2:00 PM', endTime: '5:00 PM' },
+  ],
 };
 
-const saveStoredValue = (key, value) => {
-  if (typeof window === 'undefined') {
-    return;
+const safeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
+
+const parseCsv = (raw) => {
+  const lines = String(raw || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return [];
+
+  const [header, ...rows] = lines;
+  const columns = header.split(',').map((item) => item.trim().toLowerCase());
+  const index = {
+    exam: columns.indexOf('exam'),
+    student: columns.indexOf('student'),
+  };
+
+  if (index.exam < 0 || index.student < 0) {
+    throw new Error('CSV header must include exam,student');
   }
 
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // Ignore storage failures so the app still works in restricted browsers.
+  return rows.map((line) => {
+    const parts = line.split(',').map((item) => item.trim());
+    return {
+      exam: safeText(parts[index.exam]),
+      student: safeText(parts[index.student]),
+    };
+  }).filter((row) => row.exam && row.student);
+};
+
+const toCsv = (rows, headers) => {
+  const esc = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  return [
+    headers.map(esc).join(','),
+    ...rows.map((row) => headers.map((key) => esc(row[key] ?? '')).join(',')),
+  ].join('\n');
+};
+
+const buildSlots = (sessionConfig) => {
+  const slots = [];
+  const startDate = new Date(sessionConfig.startDate);
+  const endDate = new Date(sessionConfig.endDate || sessionConfig.startDate);
+
+  if (Number.isNaN(startDate.valueOf()) || Number.isNaN(endDate.valueOf())) {
+    return slots;
   }
-};
 
-const normalizeText = (value) => value.trim().replace(/\s+/g, ' ');
+  let cursor = new Date(startDate);
+  let index = 0;
 
-const csvEscape = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  while (cursor <= endDate) {
+    const dayName = cursor.toLocaleDateString('en-US', { weekday: 'long' });
+    if (dayName !== 'Sunday') {
+      const dateLabel = cursor.toLocaleDateString('en-US', { month: 'short', day: 'numeric', weekday: 'short' });
+      for (let i = 0; i < Math.max(1, Number(sessionConfig.slotsPerDay) || 1); i += 1) {
+        const window = sessionConfig.timeWindows[i] || sessionConfig.timeWindows[sessionConfig.timeWindows.length - 1];
+        if (!window) continue;
 
-const buildStudentIds = (prefix, count) => {
-  const normalizedPrefix = prefix || 'exam';
-  const total = Number.isFinite(count) && count > 0 ? count : 1;
+        slots.push({
+          id: `S-${index}-${i}`,
+          date: new Date(cursor).toISOString(),
+          day: dayName,
+          time: window.startTime,
+          endTime: window.endTime,
+          name: `${dateLabel} - ${window.startTime} - ${window.endTime}`,
+        });
+      }
+    }
 
-  return Array.from({ length: total }, (_, index) => (
-    `${normalizedPrefix}-Student-${String(index + 1).padStart(3, '0')}`
-  ));
-};
-
-const getDefaultTheme = () => {
-  if (typeof window === 'undefined') {
-    return 'dark';
+    cursor.setDate(cursor.getDate() + 1);
+    index += 1;
   }
 
-  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  return slots;
 };
 
-const cloneDefaultExams = () => INITIAL_EXAMS.map(exam => ({ ...exam, students: [...exam.students] }));
-
-const cloneDefaultRooms = () => INITIAL_ROOMS.map(room => ({ ...room }));
-
-const cloneDefaultConstraints = () => ({ ...DEFAULT_CONSTRAINTS });
-
-const buildExportPayload = ({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth, theme, density, savedProfiles, auditTrail }) => ({
-  exams,
-  rooms,
-  startDateStr,
-  slots,
-  timetable,
-  constraintConfig,
-  holidays,
-  currentMonth: currentMonth.toISOString(),
-  theme,
-  density,
-  savedProfiles,
-  auditTrail,
-  exportedAt: new Date().toISOString(),
-});
-
-const formatDateTime = (iso) => new Date(iso).toLocaleString('en-US', {
-  month: 'short',
-  day: 'numeric',
-  hour: 'numeric',
-  minute: '2-digit',
-});
-
-const downloadTextFile = (filename, content, mimeType) => {
-  const blob = new Blob([content], { type: mimeType });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(link.href);
+const suggestionByReason = {
+  'insufficient-capacity': 'Increase room capacity or add more rooms for this slot.',
+  'min-gap-violation': 'Reduce minimum gap days or add more slots across dates.',
+  'same-day-student-conflict': 'Move one exam to another day or split student roster.',
+  'duration-overflow': 'Extend slot time window or reduce exam duration.',
+  'locked-min-gap-violation': 'Remove one lock or reduce min-gap settings.',
+  'holiday': 'Change holiday selection or create additional non-holiday slots.',
 };
-
 
 function App() {
-  const importInputRef = useRef(null);
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authError, setAuthError] = useState('');
 
-  const [exams, setExams] = useState(() => readStoredValue('examflow.exams', cloneDefaultExams()));
-  const [rooms, setRooms] = useState(() => readStoredValue('examflow.rooms', cloneDefaultRooms()));
-  const [startDateStr, setStartDateStr] = useState(() => readStoredValue('examflow.startDateStr', DEFAULT_START_DATE));
-  const [slots, setSlots] = useState(() => generateSlots(readStoredValue('examflow.startDateStr', DEFAULT_START_DATE)));
-  const [timetable, setTimetable] = useState(() => readStoredValue('examflow.timetable', null));
+  const [workspaces, setWorkspaces] = useState([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState('');
+  const [workspaceMeta, setWorkspaceMeta] = useState({ title: '', semester: '' });
+
+  const [exams, setExams] = useState([]);
+  const [rooms, setRooms] = useState([]);
+  const [constraintConfig, setConstraintConfig] = useState(DEFAULT_CONSTRAINTS);
+  const [sessionConfig, setSessionConfig] = useState(DEFAULT_SESSION_CONFIG);
+  const [holidays, setHolidays] = useState([]);
+  const [lockedAssignments, setLockedAssignments] = useState([]);
+  const [timetable, setTimetable] = useState([]);
+  const [seatPlan, setSeatPlan] = useState(null);
+  const [trace, setTrace] = useState([]);
+  const [feedback, setFeedback] = useState('');
+  const [feedbackKind, setFeedbackKind] = useState('info');
+  const [syncStatus, setSyncStatus] = useState('idle');
+  const [retryCount, setRetryCount] = useState(0);
+  const [serverRevision, setServerRevision] = useState(null);
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [activeTab, setActiveTab] = useState('input');
-  const [error, setError] = useState(null);
-  const [feedback, setFeedback] = useState(null);
-  const [constraintConfig, setConstraintConfig] = useState(() => readStoredValue('examflow.constraints', cloneDefaultConstraints()));
-  const [isTimetableStale, setIsTimetableStale] = useState(false);
-  const [staleReason, setStaleReason] = useState('');
+  const [examFilter, setExamFilter] = useState('');
+  const [roomFilter, setRoomFilter] = useState('');
+
+  const [newExam, setNewExam] = useState({ name: '', marks: 30, durationMinutes: 120 });
+  const [newRoom, setNewRoom] = useState({ name: '', capacity: 35 });
+  const [rosterCsv, setRosterCsv] = useState('');
+  const [reports, setReports] = useState({ roomWise: {}, studentWise: {} });
+  const [showSyllabusUpload, setShowSyllabusUpload] = useState(false);
+
+  const [historyPast, setHistoryPast] = useState([]);
+  const [historyFuture, setHistoryFuture] = useState([]);
+
+  const [shareLink, setShareLink] = useState('');
+  const [sharedTokenInput, setSharedTokenInput] = useState('');
+  const [examEditDraft, setExamEditDraft] = useState(null);
+  const [roomEditDraft, setRoomEditDraft] = useState(null);
+  const [studentReportQuery, setStudentReportQuery] = useState('');
+  const [studentReportPage, setStudentReportPage] = useState(1);
+  const [studentReportSort, setStudentReportSort] = useState('student-asc');
+  const serverRevisionRef = useRef(null);
+  const syncStatusRef = useRef(syncStatus);
+
+  const STUDENT_REPORT_PAGE_SIZE = 15;
 
   useEffect(() => {
-    setSlots(generateSlots(startDateStr));
-  }, [startDateStr]);
-
-  const [holidays, setHolidays] = useState(() => readStoredValue('examflow.holidays', []));
-  const [currentMonth, setCurrentMonth] = useState(() => {
-    const storedMonth = readStoredValue('examflow.currentMonth', DEFAULT_MONTH);
-    return new Date(storedMonth);
-  });
-
-  const [newExamName, setNewExamName] = useState('');
-  const [newExamMarks, setNewExamMarks] = useState(30);
-  const [newRoomName, setNewRoomName] = useState('');
-  const [newRoomCap, setNewRoomCap] = useState(35);
-  const [examSearch, setExamSearch] = useState('');
-  const [roomSearch, setRoomSearch] = useState('');
-  const [profileName, setProfileName] = useState('');
-  const [savedProfiles, setSavedProfiles] = useState(() => readStoredValue(PROFILE_STORAGE_KEY, []));
-  const [auditTrail, setAuditTrail] = useState(() => readStoredValue(AUDIT_STORAGE_KEY, []));
-  const [theme, setTheme] = useState(() => readStoredValue(THEME_STORAGE_KEY, getDefaultTheme()));
-  const [density, setDensity] = useState(() => readStoredValue(DENSITY_STORAGE_KEY, 'comfortable'));
-  const [apiStatus, setApiStatus] = useState('connecting');
-  const [isWorkspaceLoaded, setIsWorkspaceLoaded] = useState(false);
+    serverRevisionRef.current = serverRevision;
+  }, [serverRevision]);
 
   useEffect(() => {
-    saveStoredValue('examflow.exams', exams);
-  }, [exams]);
+    syncStatusRef.current = syncStatus;
+  }, [syncStatus]);
 
-  useEffect(() => {
-    saveStoredValue('examflow.rooms', rooms);
-  }, [rooms]);
-
-  useEffect(() => {
-    saveStoredValue('examflow.startDateStr', startDateStr);
-  }, [startDateStr]);
-
-  useEffect(() => {
-    saveStoredValue('examflow.constraints', constraintConfig);
-  }, [constraintConfig]);
-
-  useEffect(() => {
-    saveStoredValue('examflow.holidays', holidays);
-  }, [holidays]);
-
-  useEffect(() => {
-    saveStoredValue('examflow.currentMonth', currentMonth.toISOString());
-  }, [currentMonth]);
-
-  useEffect(() => {
-    saveStoredValue('examflow.timetable', timetable);
-  }, [timetable]);
-
-  useEffect(() => {
-    saveStoredValue(THEME_STORAGE_KEY, theme);
-    if (typeof document !== 'undefined') {
-      document.documentElement.setAttribute('data-theme', theme);
-    }
-  }, [theme]);
-
-  useEffect(() => {
-    saveStoredValue(DENSITY_STORAGE_KEY, density);
-  }, [density]);
-
-  useEffect(() => {
-    saveStoredValue(PROFILE_STORAGE_KEY, savedProfiles);
-  }, [savedProfiles]);
-
-  useEffect(() => {
-    saveStoredValue(AUDIT_STORAGE_KEY, auditTrail);
-  }, [auditTrail]);
+  const slots = useMemo(() => buildSlots(sessionConfig), [sessionConfig]);
 
   const filteredExams = useMemo(() => {
-    const query = examSearch.trim().toLowerCase();
-    if (!query) {
-      return exams;
-    }
-
-    return exams.filter(exam => (
-      exam.name.toLowerCase().includes(query) || String(exam.marks).includes(query)
+    const query = safeText(examFilter).toLowerCase();
+    if (!query) return exams;
+    return exams.filter((exam) => (
+      String(exam.name || '').toLowerCase().includes(query)
+      || String(exam.marks || '').includes(query)
     ));
-  }, [examSearch, exams]);
+  }, [examFilter, exams]);
 
   const filteredRooms = useMemo(() => {
-    const query = roomSearch.trim().toLowerCase();
-    if (!query) {
-      return rooms;
-    }
-
-    return rooms.filter(room => (
-      room.name.toLowerCase().includes(query) || String(room.capacity).includes(query)
+    const query = safeText(roomFilter).toLowerCase();
+    if (!query) return rooms;
+    return rooms.filter((room) => (
+      String(room.name || '').toLowerCase().includes(query)
+      || String(room.capacity || '').includes(query)
     ));
-  }, [roomSearch, rooms]);
+  }, [roomFilter, rooms]);
 
-  const markTimetableStale = (reason) => {
-    if (timetable) {
-      setIsTimetableStale(true);
-      setStaleReason(reason);
-    }
-
-    setError(null);
-  };
-
-  const handleStartDateChange = (value) => {
-    setStartDateStr(value);
-
-    if (timetable) {
-      setIsTimetableStale(true);
-      setStaleReason('Session date updated');
-    }
-  };
-
-  const resetTimetableState = () => {
-    setTimetable(null);
-    setIsTimetableStale(false);
-    setStaleReason('');
-    setError(null);
-  };
-
-  const pushAuditEvent = useCallback((event, details) => {
-    setAuditTrail(prev => [{
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      timestamp: new Date().toISOString(),
-      event,
-      details,
-    }, ...prev].slice(0, MAX_AUDIT_EVENTS));
-  }, []);
-
-  const applyWorkspacePayload = useCallback((payload, sourceLabel = 'workspace') => {
-    if (!payload || typeof payload !== 'object') {
-      throw new Error('Invalid workspace payload.');
-    }
-
-    skipTimetableResetRef.current = true;
-
-    if (Array.isArray(payload.exams)) setExams(payload.exams);
-    if (Array.isArray(payload.rooms)) setRooms(payload.rooms);
-    if (typeof payload.startDateStr === 'string') setStartDateStr(payload.startDateStr);
-    if (Array.isArray(payload.slots)) setSlots(payload.slots);
-    if (Array.isArray(payload.holidays)) setHolidays(payload.holidays);
-    if (payload.constraintConfig && typeof payload.constraintConfig === 'object') {
-      setConstraintConfig({ ...DEFAULT_CONSTRAINTS, ...payload.constraintConfig });
-    }
-    if (payload.currentMonth) {
-      setCurrentMonth(new Date(payload.currentMonth));
-    }
-    if (typeof payload.theme === 'string') setTheme(payload.theme);
-    if (typeof payload.density === 'string') setDensity(payload.density);
-    if (Array.isArray(payload.savedProfiles)) setSavedProfiles(payload.savedProfiles);
-    if (Array.isArray(payload.auditTrail)) setAuditTrail(payload.auditTrail);
-    setTimetable(Array.isArray(payload.timetable) ? payload.timetable : null);
-    setIsTimetableStale(false);
-    setStaleReason('');
-    setActiveTab(Array.isArray(payload.timetable) ? 'output' : 'input');
-    pushAuditEvent('workspace-loaded', `Loaded from ${sourceLabel}`);
-  }, [pushAuditEvent]);
-
-  const workspaceSnapshot = useMemo(() => buildExportPayload({
+  const snapshot = useMemo(() => ({
     exams,
     rooms,
-    startDateStr,
     slots,
     timetable,
-    constraintConfig,
+    seatPlan,
     holidays,
-    currentMonth,
-    theme,
-    density,
-    savedProfiles,
-    auditTrail,
-  }), [auditTrail, constraintConfig, currentMonth, density, exams, holidays, rooms, savedProfiles, slots, startDateStr, theme, timetable]);
+    sessionConfig,
+    lockedAssignments,
+    constraintConfig,
+    roster: exams.flatMap((exam) => (exam.students || []).map((student) => ({ examId: exam.id, student }))),
+  }), [constraintConfig, exams, holidays, lockedAssignments, rooms, seatPlan, sessionConfig, slots, timetable]);
 
-  useEffect(() => {
-    let isCancelled = false;
+  const pushHistory = (nextState) => {
+    setHistoryPast((prev) => [...prev.slice(-29), snapshot]);
+    setHistoryFuture([]);
 
-    const hydrateWorkspace = async () => {
-      try {
-        const response = await loadWorkspace();
-        if (isCancelled) return;
+    setExams(nextState.exams);
+    setRooms(nextState.rooms);
+    setConstraintConfig(nextState.constraintConfig);
+    setSessionConfig(nextState.sessionConfig);
+    setHolidays(nextState.holidays);
+    setLockedAssignments(nextState.lockedAssignments);
+    setTimetable(nextState.timetable || []);
+    setSeatPlan(nextState.seatPlan || null);
+  };
 
-        const payload = response.workspace?.payload || response.workspace || response.payload || response;
-        applyWorkspacePayload(payload, 'MongoDB');
-        setApiStatus('online');
-      } catch {
-        if (!isCancelled) {
-          setApiStatus('offline');
-        }
-      } finally {
-        if (!isCancelled) {
-          setIsWorkspaceLoaded(true);
-        }
+  const hydrateWorkspace = async (workspaceId) => {
+    const response = await loadWorkspace(workspaceId);
+    const payload = response.workspace?.payload || response.workspace || {};
+
+    setExams(Array.isArray(payload.exams) ? payload.exams : []);
+    setRooms(Array.isArray(payload.rooms) ? payload.rooms : []);
+    setConstraintConfig({ ...DEFAULT_CONSTRAINTS, ...(payload.constraintConfig || {}) });
+    setSessionConfig({ ...DEFAULT_SESSION_CONFIG, ...(payload.sessionConfig || {}) });
+    setHolidays(Array.isArray(payload.holidays) ? payload.holidays : []);
+    setLockedAssignments(Array.isArray(payload.lockedAssignments) ? payload.lockedAssignments : []);
+    setTimetable(Array.isArray(payload.timetable) ? payload.timetable : []);
+    setSeatPlan(payload.seatPlan || null);
+    setServerRevision(response.workspace?.updatedAt || null);
+    setSyncStatus('synced');
+    setHistoryPast([]);
+    setHistoryFuture([]);
+  };
+
+  const bootstrap = useCallback(async () => {
+    try {
+      const me = await fetchCurrentUser();
+      setCurrentUser(me.user);
+
+      const list = await listWorkspaces();
+      const items = list.workspaces || [];
+      setWorkspaces(items);
+
+      if (items.length) {
+        setActiveWorkspaceId(items[0].id);
+        setWorkspaceMeta({ title: items[0].title, semester: items[0].semester });
+        await hydrateWorkspace(items[0].id);
       }
-    };
-
-    hydrateWorkspace();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [applyWorkspacePayload]);
+    } catch {
+      setCurrentUser(null);
+    } finally {
+      setIsBootstrapping(false);
+    }
+  }, []);
 
   useEffect(() => {
-    if (!isWorkspaceLoaded) {
+    const timer = window.setTimeout(() => {
+      bootstrap();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [bootstrap]);
+
+  useEffect(() => {
+    if (!currentUser || !activeWorkspaceId || syncStatusRef.current === 'conflict') return;
+
+    const timeout = syncStatusRef.current === 'error'
+      ? Math.min(1000 * Math.pow(2, retryCount), 30000) // Exponential backoff max 30s
+      : 350; // Normal debounce
+
+    const timer = window.setTimeout(() => {
+      setSyncStatus('syncing');
+      saveWorkspace(activeWorkspaceId, snapshot, serverRevisionRef.current)
+        .then((response) => {
+          setServerRevision(response.workspace?.updatedAt || serverRevisionRef.current);
+          setSyncStatus('synced');
+          setRetryCount(0);
+        })
+        .catch((error) => {
+          if (error?.status === 401) {
+            setCurrentUser(null);
+            setFeedbackKind('error');
+            setFeedback('Session expired. Please sign in again.');
+            return;
+          }
+
+          if (error?.status === 409) {
+            setSyncStatus('conflict');
+            setFeedbackKind('error');
+            setFeedback('Autosave conflict detected. Reload server version or force save.');
+            return;
+          }
+
+          setSyncStatus('error');
+          setRetryCount((c) => c + 1);
+          setFeedbackKind('error');
+          setFeedback(`Autosave failed. Retrying in ${Math.round(timeout / 1000)}s...`);
+        });
+    }, timeout);
+
+    return () => window.clearTimeout(timer);
+  }, [activeWorkspaceId, currentUser, snapshot, retryCount]);
+
+  const handleLogin = async () => {
+    setAuthError('');
+    try {
+      await login(loginForm.username, loginForm.password);
+      await bootstrap();
+      setFeedbackKind('success');
+      setFeedback('Signed in successfully.');
+    } catch (error) {
+      setAuthError(error.message || 'Login failed.');
+    }
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    setCurrentUser(null);
+    setWorkspaces([]);
+    setActiveWorkspaceId('');
+  };
+
+  const selectWorkspace = async (workspaceId) => {
+    const target = workspaces.find((item) => item.id === workspaceId);
+    setActiveWorkspaceId(workspaceId);
+    setWorkspaceMeta({ title: target?.title || '', semester: target?.semester || '' });
+    await hydrateWorkspace(workspaceId);
+  };
+
+  const handleCreateWorkspace = async () => {
+    if (!safeText(workspaceMeta.title) || !safeText(workspaceMeta.semester)) {
+      setFeedback('Workspace title and semester are required.');
       return;
     }
 
-    const timer = window.setTimeout(() => {
-      saveWorkspace(workspaceSnapshot).catch(() => {
-        setApiStatus('offline');
-      });
-    }, 350);
+    try {
+      const response = await createWorkspace(workspaceMeta);
+      const created = response.workspace;
+      const list = await listWorkspaces();
+      setWorkspaces(list.workspaces || []);
+      await selectWorkspace(created.id);
+      setFeedbackKind('success');
+      setFeedback('Workspace created.');
+    } catch (error) {
+      setFeedbackKind('error');
+      setFeedback(error.message || 'Failed to create workspace.');
+    }
+  };
 
-    return () => window.clearTimeout(timer);
-  }, [isWorkspaceLoaded, workspaceSnapshot]);
+  const handleRenameWorkspace = async () => {
+    if (!activeWorkspaceId) return;
+    try {
+      await updateWorkspaceMeta(activeWorkspaceId, workspaceMeta);
+      const list = await listWorkspaces();
+      setWorkspaces(list.workspaces || []);
+      setFeedbackKind('success');
+      setFeedback('Workspace metadata updated.');
+    } catch (error) {
+      setFeedbackKind('error');
+      setFeedback(error.message || 'Failed to rename workspace.');
+    }
+  };
 
-  const toggleHoliday = (dateStr) => {
-    setHolidays(prev => (prev.includes(dateStr) ? prev.filter(d => d !== dateStr) : [...prev, dateStr]));
-    markTimetableStale('Holiday selection changed');
-    pushAuditEvent('holiday-toggled', dateStr);
+  const handleDeleteWorkspace = async () => {
+    if (!activeWorkspaceId) return;
+    if (!window.confirm('Delete this workspace permanently?')) return;
+
+    try {
+      await deleteWorkspace(activeWorkspaceId);
+      const list = await listWorkspaces();
+      const items = list.workspaces || [];
+      setWorkspaces(items);
+      if (items.length) {
+        await selectWorkspace(items[0].id);
+      } else {
+        setActiveWorkspaceId('');
+        setExams([]);
+        setRooms([]);
+      }
+      setFeedbackKind('success');
+      setFeedback('Workspace deleted.');
+    } catch (error) {
+      setFeedbackKind('error');
+      setFeedback(error.message || 'Failed to delete workspace.');
+    }
   };
 
   const addExam = () => {
-    const cleanedName = normalizeText(newExamName);
-    if (!cleanedName) {
-      setFeedback({ type: 'error', text: 'Enter an exam name before adding it.' });
+    const name = safeText(newExam.name);
+    if (!name) {
+      setFeedbackKind('error');
+      setFeedback('Exam name is required.');
       return;
     }
-
-    if (exams.some(exam => exam.name.toLowerCase() === cleanedName.toLowerCase())) {
-      setFeedback({ type: 'error', text: 'That exam already exists in the list.' });
-      return;
-    }
-
-    const parsedMarks = Number.parseInt(newExamMarks, 10);
-    if (![30, 60].includes(parsedMarks)) {
-      setFeedback({ type: 'error', text: 'Marks must be either 30 or 60.' });
-      return;
-    }
-
-    const newExam = {
-      id: Date.now().toString(),
-      name: cleanedName,
-      students: buildStudentIds(cleanedName.replace(/[^a-z0-9]+/gi, '-').toLowerCase(), 400),
-      marks: parsedMarks,
-      type: parsedMarks === 60 ? 'THEORY' : 'LAB',
+    const next = {
+      ...snapshot,
+      exams: [...exams, {
+        id: `E-${Date.now()}`,
+        name,
+        marks: Number(newExam.marks) || 30,
+        durationMinutes: Number(newExam.durationMinutes) || 120,
+        students: [],
+      }],
     };
-    setExams([...exams, newExam]);
-    setNewExamName('');
-    markTimetableStale('Exam list changed');
-    setFeedback({ type: 'success', text: 'Exam added. Regenerate to refresh the timetable.' });
-    pushAuditEvent('exam-added', cleanedName);
+    pushHistory(next);
+    setNewExam({ name: '', marks: 30, durationMinutes: 120 });
+    setFeedbackKind('success');
+    setFeedback('Exam added.');
+  };
+
+  const handleSyllabusDetailsExtracted = (details) => {
+    // Auto-add extracted exam to the workspace so it appears immediately
+    const added = {
+      id: `E-${Date.now()}`,
+      name: details.subjectName || '',
+      marks: Number(details.marks) || 30,
+      durationMinutes: Number(details.durationMinutes) || 120,
+      students: [],
+    };
+
+    const next = {
+      ...snapshot,
+      exams: [...exams, added],
+    };
+
+    pushHistory(next);
+    setShowSyllabusUpload(false);
+    setFeedbackKind('success');
+    setFeedback(`Extracted and added exam: ${details.subjectName || 'Exam'}.`);
   };
 
   const addRoom = () => {
-    const cleanedName = normalizeText(newRoomName);
-    const parsedCapacity = Number.parseInt(newRoomCap, 10);
-
-    if (!cleanedName) {
-      setFeedback({ type: 'error', text: 'Enter a room name before adding it.' });
-      return;
-    }
-
-    if (!Number.isFinite(parsedCapacity) || parsedCapacity <= 0) {
-      setFeedback({ type: 'error', text: 'Room capacity must be a positive number.' });
-      return;
-    }
-
-    if (rooms.some(room => room.name.toLowerCase() === cleanedName.toLowerCase())) {
-      setFeedback({ type: 'error', text: 'That room already exists in the list.' });
-      return;
-    }
-
-    const newRoom = {
-      id: 'R' + Date.now(),
-      name: cleanedName,
-      capacity: parsedCapacity
-    };
-    setRooms([...rooms, newRoom]);
-    setNewRoomName('');
-    setNewRoomCap(35);
-    markTimetableStale('Room list changed');
-    setFeedback({ type: 'success', text: 'Room added. Regenerate to refresh the timetable.' });
-    pushAuditEvent('room-added', cleanedName);
-  };
-
-  const removeExam = (id) => {
-    const removed = exams.find(e => e.id === id);
-    setExams(exams.filter(e => e.id !== id));
-    markTimetableStale('Exam removed');
-    if (removed) pushAuditEvent('exam-removed', removed.name);
-  };
-
-  const removeRoom = (id) => {
-    const removed = rooms.find(r => r.id === id);
-    setRooms(rooms.filter(r => r.id !== id));
-    markTimetableStale('Room removed');
-    if (removed) pushAuditEvent('room-removed', removed.name);
-  };
-
-  const updateConstraint = (key, value) => {
-    setConstraintConfig(prev => ({ ...prev, [key]: value }));
-    markTimetableStale('Constraint settings changed');
-  };
-
-  const handleExportBackup = () => {
-    const payload = buildExportPayload({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth, theme, density, savedProfiles, auditTrail });
-    downloadTextFile(`exam-cell-backup-${startDateStr}.json`, JSON.stringify(payload, null, 2), 'application/json');
-    setFeedback({ type: 'success', text: 'Backup exported successfully.' });
-    pushAuditEvent('backup-exported', `Backup for ${startDateStr}`);
-  };
-
-  const handleExportTimetableCsv = () => {
-    if (!timetable || !timetable.length) {
-      setFeedback({ type: 'error', text: 'Generate a timetable before exporting CSV.' });
-      return;
-    }
-
-    const rows = [
-      ['Date', 'Time', 'Rooms', 'Exam', 'Marks', 'Seat Use'].map(csvEscape).join(','),
-      ...timetable.map(item => [
-        item.slot.name,
-        `${item.startTime} - ${item.endTime}`,
-        item.rooms.map(room => room.name).join(' | '),
-        item.exam.name,
-        item.exam.marks,
-        `${item.exam.students.length}/${item.totalCapacity}`,
-      ].map(csvEscape).join(',')),
-    ];
-
-    downloadTextFile(`exam-cell-timetable-${startDateStr}.csv`, rows.join('\n'), 'text/csv');
-    setFeedback({ type: 'success', text: 'Timetable CSV exported successfully.' });
-    pushAuditEvent('csv-exported', `Rows: ${timetable.length}`);
-  };
-
-  const handleImportClick = () => {
-    importInputRef.current?.click();
-  };
-
-  const handleImportBackup = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
-
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      applyWorkspacePayload(parsed, `file: ${file.name}`);
-      setFeedback({ type: 'success', text: 'Backup imported successfully.' });
-    } catch {
-      setFeedback({ type: 'error', text: 'The selected file is not a valid Exam Cell backup.' });
-    } finally {
-      event.target.value = '';
-    }
-  };
-
-  const handleSaveProfile = () => {
-    const name = normalizeText(profileName);
+    const name = safeText(newRoom.name);
     if (!name) {
-      setFeedback({ type: 'error', text: 'Provide a profile name before saving.' });
+      setFeedbackKind('error');
+      setFeedback('Room name is required.');
       return;
     }
+    const next = {
+      ...snapshot,
+      rooms: [...rooms, {
+        id: `R-${Date.now()}`,
+        name,
+        capacity: Number(newRoom.capacity) || 35,
+      }],
+    };
+    pushHistory(next);
+    setNewRoom({ name: '', capacity: 35 });
+    setFeedbackKind('success');
+    setFeedback('Room added.');
+  };
 
-    const payload = buildExportPayload({ exams, rooms, startDateStr, slots, timetable, constraintConfig, holidays, currentMonth, theme, density, savedProfiles, auditTrail });
-    const profile = { name, updatedAt: new Date().toISOString(), payload };
+  const startEditExam = (examId) => {
+    const target = exams.find((exam) => exam.id === examId);
+    if (!target) return;
 
-    setSavedProfiles(prev => {
-      const withoutCurrent = prev.filter(item => item.name.toLowerCase() !== name.toLowerCase());
-      return [profile, ...withoutCurrent].slice(0, 20);
+    setExamEditDraft({
+      id: target.id,
+      name: target.name,
+      marks: Number(target.marks) || 30,
+      durationMinutes: Number(target.durationMinutes) || 120,
     });
-
-    setProfileName('');
-    setFeedback({ type: 'success', text: `Profile "${name}" saved.` });
-    pushAuditEvent('profile-saved', name);
   };
 
-  const handleLoadProfile = (name) => {
-    const target = savedProfiles.find(profile => profile.name === name);
-    if (!target) {
-      setFeedback({ type: 'error', text: 'Selected profile is no longer available.' });
+  const saveExamEdit = () => {
+    if (!examEditDraft) return;
+
+    const cleanedName = safeText(examEditDraft.name);
+    if (!cleanedName) {
+      setFeedback('Exam name cannot be empty.');
       return;
     }
 
+    pushHistory({
+      ...snapshot,
+      exams: exams.map((exam) => exam.id === examEditDraft.id ? {
+        ...exam,
+        name: cleanedName,
+        marks: Number(examEditDraft.marks) || exam.marks,
+        durationMinutes: Number(examEditDraft.durationMinutes) || exam.durationMinutes || 120,
+      } : exam),
+    });
+    setExamEditDraft(null);
+  };
+
+  const startEditRoom = (roomId) => {
+    const target = rooms.find((room) => room.id === roomId);
+    if (!target) return;
+
+    setRoomEditDraft({
+      id: target.id,
+      name: target.name,
+      capacity: Number(target.capacity) || 1,
+    });
+  };
+
+  const saveRoomEdit = () => {
+    if (!roomEditDraft) return;
+
+    const cleanedName = safeText(roomEditDraft.name);
+    const capacity = Number(roomEditDraft.capacity) || 0;
+    if (!cleanedName || capacity <= 0) {
+      setFeedback('Room name and positive capacity are required.');
+      return;
+    }
+
+    pushHistory({
+      ...snapshot,
+      rooms: rooms.map((room) => room.id === roomEditDraft.id ? {
+        ...room,
+        name: cleanedName,
+        capacity,
+      } : room),
+    });
+    setRoomEditDraft(null);
+  };
+
+  const removeExam = (examId) => {
+    if (!window.confirm('Remove this exam?')) return;
+    pushHistory({ ...snapshot, exams: exams.filter((exam) => exam.id !== examId) });
+  };
+
+  const removeRoom = (roomId) => {
+    if (!window.confirm('Remove this room?')) return;
+    pushHistory({ ...snapshot, rooms: rooms.filter((room) => room.id !== roomId) });
+  };
+
+  const exportRosterCsv = () => {
+    const rows = exams.flatMap((exam) => (exam.students || []).map((student) => ({ exam: exam.name, student })));
+    const csv = toCsv(rows, ['exam', 'student']);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'student-roster.csv';
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
+  const importRosterCsv = () => {
     try {
-      applyWorkspacePayload(target.payload, `profile: ${name}`);
-      setFeedback({ type: 'success', text: `Profile "${name}" loaded.` });
-    } catch {
-      setFeedback({ type: 'error', text: 'Could not load this profile.' });
+      const rows = parseCsv(rosterCsv);
+      const byExam = rows.reduce((acc, row) => {
+        if (!acc[row.exam]) acc[row.exam] = [];
+        acc[row.exam].push(row.student);
+        return acc;
+      }, {});
+
+      pushHistory({
+        ...snapshot,
+        exams: exams.map((exam) => {
+          const merged = [...new Set([...(exam.students || []), ...(byExam[exam.name] || [])])];
+          return { ...exam, students: merged };
+        }),
+      });
+      setFeedbackKind('success');
+      setFeedback('Roster imported.');
+    } catch (error) {
+      setFeedbackKind('error');
+      setFeedback(error.message || 'CSV import failed.');
     }
   };
 
-  const handleDeleteProfile = (name) => {
-    setSavedProfiles(prev => prev.filter(profile => profile.name !== name));
-    setFeedback({ type: 'success', text: `Profile "${name}" deleted.` });
-    pushAuditEvent('profile-deleted', name);
+  const exportTimetableCsv = () => {
+    const rows = timetable.map((item) => ({
+      date: item.slot.name,
+      time: `${item.startTime} - ${item.endTime}`,
+      exam: item.exam.name,
+      rooms: (item.rooms || []).map((room) => room.name).join(' | '),
+      seats: `${item.exam.students.length}/${item.totalCapacity}`,
+    }));
+    const csv = toCsv(rows, ['date', 'time', 'exam', 'rooms', 'seats']);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'timetable.csv';
+    link.click();
+    URL.revokeObjectURL(link.href);
   };
 
-  const handleClearAudit = () => {
-    setAuditTrail([]);
-    setFeedback({ type: 'success', text: 'Activity log cleared.' });
+  const exportSeatPlanCsv = () => {
+    const rows = (seatPlan?.byExam || []).flatMap((examEntry) => examEntry.students.map((row) => ({
+      student: row.student,
+      exam: row.examName,
+      slot: row.slotName,
+      room: row.roomName,
+    })));
+    const csv = toCsv(rows, ['student', 'exam', 'slot', 'room']);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'seat-plan.csv';
+    link.click();
+    URL.revokeObjectURL(link.href);
   };
-
-  const handleResetWorkspace = () => {
-    setExams(cloneDefaultExams());
-    setRooms(cloneDefaultRooms());
-    setStartDateStr(DEFAULT_START_DATE);
-    setSlots(generateSlots(DEFAULT_START_DATE));
-    resetTimetableState();
-    setHolidays([]);
-    setCurrentMonth(new Date(DEFAULT_MONTH));
-    setConstraintConfig(cloneDefaultConstraints());
-    setActiveTab('input');
-    setFeedback({ type: 'success', text: 'Demo data restored.' });
-    pushAuditEvent('workspace-reset', 'Demo data restored');
-
-    if (typeof window !== 'undefined') {
-      [
-        'examflow.exams',
-        'examflow.rooms',
-        'examflow.startDateStr',
-        'examflow.timetable',
-        'examflow.constraints',
-        'examflow.holidays',
-        'examflow.currentMonth',
-      ].forEach(key => window.localStorage.removeItem(key));
-    }
-  };
-
-  const timetableConflicts = useMemo(() => {
-    if (!timetable) return [];
-    return detectConflicts(timetable, { ...constraintConfig, holidays });
-  }, [timetable, constraintConfig, holidays]);
-
-  const stats = useMemo(() => {
-    const totalStudents = exams.reduce((sum, exam) => sum + exam.students.length, 0);
-    const totalSeats = rooms.reduce((sum, room) => sum + room.capacity, 0);
-    const scheduledDays = timetable ? new Set(timetable.map(item => item.slot.date)).size : 0;
-
-    return [
-      { label: 'Exams', value: exams.length, tone: 'primary', detail: `${filteredExams.length} visible` },
-      { label: 'Rooms', value: rooms.length, tone: 'success', detail: `${totalSeats} total seats` },
-      { label: 'Students', value: totalStudents, tone: 'accent', detail: 'Across all exams' },
-      { label: 'Holidays', value: holidays.length, tone: 'danger', detail: timetable ? `${scheduledDays} days used` : 'Not scheduled yet' },
-    ];
-  }, [exams, filteredExams.length, rooms, holidays.length, timetable]);
 
   const handleGenerate = async () => {
-    setIsGenerating(true);
-    setError(null);
-    setFeedback(null);
+    if (!activeWorkspaceId) return;
 
     try {
-      const response = await generateWorkspaceTimetable(workspaceSnapshot);
-      const result = response.timetable || response.workspace?.payload?.timetable || null;
+      setIsGenerating(true);
+      const payload = { ...snapshot, slots };
+      const response = await generateWorkspaceTimetable(activeWorkspaceId, payload, serverRevisionRef.current);
+      setTimetable(response.timetable || []);
+      setSeatPlan(response.seatPlan || null);
+      setTrace(Array.isArray(response.trace) ? response.trace : []);
+      setServerRevision(response.workspace?.updatedAt || serverRevisionRef.current);
+      setSyncStatus('synced');
+      setFeedbackKind('success');
+      setFeedback('Timetable generated.');
 
-      if (result) {
-        setTimetable(result);
-        setIsTimetableStale(false);
-        setStaleReason('');
-        setActiveTab('output');
-        setFeedback({ type: 'success', text: 'Timetable generated and saved to MongoDB.' });
-        pushAuditEvent('timetable-generated', `Assignments: ${result.length}`);
-        setApiStatus('online');
-        return;
-      }
-
-      throw new Error('Server did not return a timetable.');
-    } catch {
-      const result = generateTimetable(exams, rooms, slots, {
-        ...constraintConfig,
-        holidays,
+      const reportPayload = await fetchWorkspaceReports(activeWorkspaceId);
+      setReports({
+        roomWise: reportPayload.roomWise || {},
+        studentWise: reportPayload.studentWise || {},
       });
-
-      if (result) {
-        setTimetable(result);
-        setIsTimetableStale(false);
-        setStaleReason('');
-        setActiveTab('output');
-        setFeedback({ type: 'success', text: 'Timetable generated locally and will sync when the backend is available.' });
-        pushAuditEvent('timetable-generated', `Assignments: ${result.length}`);
-        setApiStatus('offline');
+      setStudentReportPage(1);
+    } catch (error) {
+      setSyncStatus('error');
+      setFeedbackKind('error');
+      if (error?.status === 422) {
+        setFeedback('No feasible schedule found with current constraints. Try adding more slots or relaxing gap rules.');
       } else {
-        setError('Could not generate a conflict-free timetable. Try adding more rooms or adjusting gaps.');
-        pushAuditEvent('timetable-failed', 'Generation failed with current constraints');
+        setFeedback(error.message || 'Generation failed.');
       }
     } finally {
       setIsGenerating(false);
     }
   };
 
+  const pinExam = (examId, slotId) => {
+    const exists = lockedAssignments.some((item) => item.examId === examId);
+    const nextLocks = exists
+      ? lockedAssignments.map((item) => item.examId === examId ? { ...item, slotId } : item)
+      : [...lockedAssignments, { examId, slotId, roomIds: [] }];
+
+    pushHistory({ ...snapshot, lockedAssignments: nextLocks });
+  };
+
+  const setPinnedRooms = (examId, roomIds) => {
+    const nextLocks = lockedAssignments.map((item) => item.examId === examId ? {
+      ...item,
+      roomIds,
+    } : item);
+
+    pushHistory({ ...snapshot, lockedAssignments: nextLocks });
+  };
+
+  const selectAllPinnedRooms = (examId) => {
+    setPinnedRooms(examId, rooms.map((room) => room.id));
+  };
+
+  const clearAllPinnedRooms = (examId) => {
+    setPinnedRooms(examId, []);
+  };
+
+  const clearPin = (examId) => {
+    pushHistory({
+      ...snapshot,
+      lockedAssignments: lockedAssignments.filter((item) => item.examId !== examId),
+    });
+  };
+
+  const studentReportRows = useMemo(() => {
+    const entries = Object.entries(reports.studentWise || {});
+    const query = safeText(studentReportQuery).toLowerCase();
+
+    const filtered = entries.filter(([student, items]) => {
+      if (!query) return true;
+      const inStudent = student.toLowerCase().includes(query);
+      const inExam = items.some((entry) => String(entry.examName || '').toLowerCase().includes(query));
+      const inRoom = items.some((entry) => String(entry.roomName || '').toLowerCase().includes(query));
+      return inStudent || inExam || inRoom;
+    });
+
+    const sorted = [...filtered].sort((a, b) => {
+      const [studentA, entriesA] = a;
+      const [studentB, entriesB] = b;
+
+      if (studentReportSort === 'room') {
+        const roomA = String(entriesA?.[0]?.roomName || '');
+        const roomB = String(entriesB?.[0]?.roomName || '');
+        return roomA.localeCompare(roomB) || studentA.localeCompare(studentB);
+      }
+
+      if (studentReportSort === 'exam-count') {
+        return entriesB.length - entriesA.length || studentA.localeCompare(studentB);
+      }
+
+      return studentA.localeCompare(studentB);
+    });
+
+    const totalPages = Math.max(1, Math.ceil(sorted.length / STUDENT_REPORT_PAGE_SIZE));
+    const safePage = Math.min(studentReportPage, totalPages);
+    const start = (safePage - 1) * STUDENT_REPORT_PAGE_SIZE;
+    const end = start + STUDENT_REPORT_PAGE_SIZE;
+
+    return {
+      totalPages,
+      currentPage: safePage,
+      totalRows: sorted.length,
+      rows: sorted.slice(start, end),
+    };
+  }, [reports.studentWise, studentReportPage, studentReportQuery, studentReportSort]);
+
+  const handleUndo = () => {
+    const prev = historyPast[historyPast.length - 1];
+    if (!prev) return;
+
+    setHistoryFuture((f) => [snapshot, ...f]);
+    setHistoryPast((p) => p.slice(0, -1));
+
+    setExams(prev.exams || []);
+    setRooms(prev.rooms || []);
+    setConstraintConfig(prev.constraintConfig || DEFAULT_CONSTRAINTS);
+    setSessionConfig(prev.sessionConfig || DEFAULT_SESSION_CONFIG);
+    setHolidays(prev.holidays || []);
+    setLockedAssignments(prev.lockedAssignments || []);
+    setTimetable(prev.timetable || []);
+    setSeatPlan(prev.seatPlan || null);
+  };
+
+  const handleRedo = () => {
+    const next = historyFuture[0];
+    if (!next) return;
+
+    setHistoryPast((p) => [...p, snapshot]);
+    setHistoryFuture((f) => f.slice(1));
+
+    setExams(next.exams || []);
+    setRooms(next.rooms || []);
+    setConstraintConfig(next.constraintConfig || DEFAULT_CONSTRAINTS);
+    setSessionConfig(next.sessionConfig || DEFAULT_SESSION_CONFIG);
+    setHolidays(next.holidays || []);
+    setLockedAssignments(next.lockedAssignments || []);
+    setTimetable(next.timetable || []);
+    setSeatPlan(next.seatPlan || null);
+  };
+
+  const toggleShare = async (enabled) => {
+    if (!activeWorkspaceId) return;
+    const response = await setWorkspaceShare(activeWorkspaceId, enabled);
+    const token = response.workspace?.shareToken;
+    if (token) {
+      setShareLink(`${window.location.origin}?shared=${token}`);
+    } else {
+      setShareLink('');
+    }
+  };
+
+  const loadShared = async () => {
+    const token = sharedTokenInput.trim();
+    if (!token) {
+      setFeedbackKind('error');
+      setFeedback('Please enter a share token.');
+      return;
+    }
+
+    try {
+      const response = await getSharedWorkspace(token);
+      const payload = response.workspace?.payload || {};
+      setExams(payload.exams || []);
+      setRooms(payload.rooms || []);
+      setTimetable(payload.timetable || []);
+      setSeatPlan(payload.seatPlan || null);
+      setSyncStatus('idle');
+      setFeedbackKind('success');
+      setFeedback('Loaded shared workspace snapshot in view mode.');
+    } catch (error) {
+      setFeedbackKind('error');
+      setFeedback(error.message || 'Failed to load shared workspace.');
+    }
+  };
+
+  const handleReloadServerVersion = async () => {
+    if (!activeWorkspaceId) return;
+    try {
+      await hydrateWorkspace(activeWorkspaceId);
+      setFeedbackKind('info');
+      setFeedback('Reloaded latest server version.');
+    } catch (error) {
+      setFeedbackKind('error');
+      setFeedback(error.message || 'Failed to reload server version.');
+    }
+  };
+
+  const handleForceSave = async () => {
+    if (!activeWorkspaceId) return;
+    try {
+      setSyncStatus('syncing');
+      const response = await saveWorkspace(activeWorkspaceId, snapshot, null);
+      setServerRevision(response.workspace?.updatedAt || null);
+      setSyncStatus('synced');
+      setFeedbackKind('success');
+      setFeedback('Force save completed. Local changes are now on server.');
+    } catch (error) {
+      setSyncStatus('error');
+      setFeedbackKind('error');
+      setFeedback(error.message || 'Force save failed.');
+    }
+  };
+
+  if (isBootstrapping) {
+    return (
+      <div className="app-container">
+        <main className="content">
+          <section className="card glass-card max-w-md mx-auto mt-20">
+            <h2>Loading ExamFlow</h2>
+            <p>Preparing your session, workspaces, and role access...</p>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    const demoNote = import.meta.env.DEV
+      ? 'Development demo accounts are available locally.'
+      : 'Contact your administrator for login credentials.';
+
+    return (
+      <div className="app-container">
+        <main className="content">
+          <section className="card glass-card max-w-sm mx-auto mt-20">
+            <h2>ExamFlow Login</h2>
+            <p>{demoNote}</p>
+            <input
+              value={loginForm.username}
+              onChange={(e) => setLoginForm((p) => ({ ...p, username: e.target.value }))}
+              placeholder="Username"
+            />
+            <input
+              type="password"
+              value={loginForm.password}
+              onChange={(e) => setLoginForm((p) => ({ ...p, password: e.target.value }))}
+              placeholder="Password"
+            />
+            <button className="btn-primary" onClick={handleLogin}>Sign In</button>
+            {authError ? <p className="text-muted">{authError}</p> : null}
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  const canEdit = currentUser.role === 'admin' || currentUser.role === 'faculty';
+
   return (
-    <div className={`app-container density-${density}`}>
+    <div className="app-container density-comfortable">
       <nav className="sidebar glass-card">
-        <div className="logo">
-          <span className="icon">📅</span>
-          <h1>Exam Cell</h1>
-        </div>
-        <ul className="nav-links">
-          <li className={activeTab === 'input' ? 'active' : ''} onClick={() => setActiveTab('input')}>
-            Setup Data
-          </li>
-          <li className={activeTab === 'calendar' ? 'active' : ''} onClick={() => setActiveTab('calendar')}>
-            Calendar & Holi.
-          </li>
-          <li className={activeTab === 'output' ? 'active' : ''} onClick={() => setActiveTab('output')}>
-            Visualizer
-          </li>
-        </ul>
-        <div className="sidebar-footer">
-          <button className="btn-primary w-full" onClick={handleGenerate} disabled={isGenerating}>
-            {isGenerating ? 'Generating...' : 'Generate Timetable'}
-          </button>
-        </div>
+        <h1>ExamFlow</h1>
+        <p>Role: {currentUser.role}</p>
+        <button className="btn-secondary" onClick={handleLogout}>Logout</button>
+
+        <hr />
+        <h3>Workspaces</h3>
+        <select value={activeWorkspaceId} onChange={(e) => selectWorkspace(e.target.value)}>
+          <option value="">Select workspace</option>
+          {workspaces.map((item) => <option key={item.id} value={item.id}>{item.title} ({item.semester})</option>)}
+        </select>
+
+        <input
+          placeholder="Workspace title"
+          value={workspaceMeta.title}
+          onChange={(e) => setWorkspaceMeta((p) => ({ ...p, title: e.target.value }))}
+        />
+        <input
+          placeholder="Semester"
+          value={workspaceMeta.semester}
+          onChange={(e) => setWorkspaceMeta((p) => ({ ...p, semester: e.target.value }))}
+        />
+
+        {canEdit ? <button className="btn-secondary" onClick={handleCreateWorkspace}>Create</button> : null}
+        {canEdit ? <button className="btn-secondary" onClick={handleRenameWorkspace}>Rename/Update</button> : null}
+        {canEdit ? <button className="btn-secondary" onClick={handleDeleteWorkspace}>Delete</button> : null}
+
+        {canEdit ? <button className="btn-secondary" onClick={() => toggleShare(true)}>Enable Share Link</button> : null}
+        {canEdit ? <button className="btn-secondary" onClick={() => toggleShare(false)}>Disable Share Link</button> : null}
+        {shareLink ? <p>Share: {shareLink}</p> : null}
+
+        <input
+          placeholder="Shared token"
+          value={sharedTokenInput}
+          onChange={(e) => setSharedTokenInput(e.target.value)}
+        />
+        <button className="btn-secondary" onClick={loadShared}>Load Shared</button>
       </nav>
 
       <main className="content">
         <header className="top-bar hero-shell">
-          <div className="header-info">
-            <span className="eyebrow">Exam Cell scheduler</span>
-            <h2>{activeTab === 'input' ? 'Configuration' : activeTab === 'calendar' ? 'Holiday Management' : 'Generated Timetable'}</h2>
-            <p className="text-muted hero-copy">Automated backtracking scheduler with room grouping, holiday control, and browser-backed workspace storage.</p>
-            <p className="text-muted small">Backend status: {apiStatus === 'online' ? 'MongoDB connected' : apiStatus === 'connecting' ? 'Connecting to MongoDB...' : 'Local fallback active'}</p>
+          <div>
+            <h2>Workspace Editor</h2>
+            <p>Login, role permissions, multi-workspace, CRUD, slots, locks, reports, and exports.</p>
+            {feedback ? <p className={`status-${feedbackKind}`}>{feedback}</p> : null}
+            <p><span className={`sync-pill ${syncStatus}`}>Sync: {syncStatus}</span></p>
+            {syncStatus === 'conflict' ? (
+              <div className="action-row mt-10">
+                <button className="btn-secondary btn-small" onClick={handleReloadServerVersion}>Reload Server Version</button>
+                <button className="btn-secondary btn-small" onClick={handleForceSave}>Force Save Local</button>
+              </div>
+            ) : null}
           </div>
-          <div className="hero-actions-wrap">
-            {timetable && (
-              <div className={`schedule-status ${isTimetableStale ? 'is-stale' : 'is-fresh'}`}>
-                <span className="status-dot" />
-                <div>
-                  <strong>{isTimetableStale ? 'Timetable needs regeneration' : 'Timetable ready'}</strong>
-                  <p>{isTimetableStale ? staleReason : 'The current timetable matches the active setup.'}</p>
-                </div>
-              </div>
-            )}
-            <div className="hero-actions">
-              <button className="btn-secondary" onClick={() => setActiveTab('input')}>Setup</button>
-              <button className="btn-secondary" onClick={() => setActiveTab('calendar')}>Calendar</button>
-              <button className="btn-primary" onClick={handleGenerate} disabled={isGenerating}>
-                {isGenerating ? 'Generating...' : isTimetableStale ? 'Regenerate Timetable' : 'Run Engine'}
-              </button>
-            </div>
-            <div className="pref-controls" aria-label="Visual preferences">
-              <div className="pref-group" role="group" aria-label="Theme">
-                <button
-                  className={`pref-chip ${theme === 'dark' ? 'is-active' : ''}`}
-                  onClick={() => setTheme('dark')}
-                  aria-pressed={theme === 'dark'}
-                >
-                  Dark
-                </button>
-                <button
-                  className={`pref-chip ${theme === 'light' ? 'is-active' : ''}`}
-                  onClick={() => setTheme('light')}
-                  aria-pressed={theme === 'light'}
-                >
-                  Light
-                </button>
-              </div>
-              <div className="pref-group" role="group" aria-label="Density">
-                <button
-                  className={`pref-chip ${density === 'comfortable' ? 'is-active' : ''}`}
-                  onClick={() => setDensity('comfortable')}
-                  aria-pressed={density === 'comfortable'}
-                >
-                  Comfortable
-                </button>
-                <button
-                  className={`pref-chip ${density === 'compact' ? 'is-active' : ''}`}
-                  onClick={() => setDensity('compact')}
-                  aria-pressed={density === 'compact'}
-                >
-                  Compact
-                </button>
-              </div>
-            </div>
+          <div className="hero-actions">
+            <button className="btn-secondary" onClick={handleUndo} disabled={!historyPast.length}>Undo</button>
+            <button className="btn-secondary" onClick={handleRedo} disabled={!historyFuture.length}>Redo</button>
+            <button className="btn-primary" onClick={handleGenerate} disabled={!canEdit || !activeWorkspaceId || isGenerating}>{isGenerating ? 'Generating...' : 'Generate'}</button>
+            <button className="btn-secondary" onClick={() => window.print()}>Print / PDF</button>
           </div>
         </header>
 
-        <section className="stats-grid">
-          {stats.map((stat, index) => (
-            <article
-              key={stat.label}
-              className={`stat-card stat-${stat.tone} glass-card animate-in`}
-              style={{ '--stagger-index': index }}
-            >
-              <span className="stat-label">{stat.label}</span>
-              <strong className="stat-value">{stat.value}</strong>
-              <span className="stat-detail">{stat.detail}</span>
-            </article>
-          ))}
-        </section>
-
-        {feedback && (
-          <div className={`notice-banner ${feedback.type === 'error' ? 'notice-error' : feedback.type === 'success' ? 'notice-success' : 'notice-info'}`}>
-            <span>{feedback.text}</span>
-          </div>
-        )}
-
-        {timetable && isTimetableStale && (
-          <div className="notice-banner notice-info schedule-banner">
-            <span>The timetable is still visible, but it is out of date. Regenerate it after reviewing your edits.</span>
-          </div>
-        )}
-
-        {activeTab === 'input' && (
-          <section className="input-grid">
-            <div className="card glass-card span-full session-config">
-              <div className="section-header">
-                <div>
-                  <span className="section-kicker">Plan</span>
-                  <h3>Session Configuration</h3>
+        <section className="input-grid">
+          <article className="card glass-card span-full">
+            <h3>Session Configurator</h3>
+            <div className="add-form">
+              <label>Start</label>
+              <input type="date" value={sessionConfig.startDate} onChange={(e) => setSessionConfig((p) => ({ ...p, startDate: e.target.value }))} disabled={!canEdit} />
+              <label>End</label>
+              <input type="date" value={sessionConfig.endDate} onChange={(e) => setSessionConfig((p) => ({ ...p, endDate: e.target.value }))} disabled={!canEdit} />
+              <label>Slots/Day</label>
+              <input type="number" value={sessionConfig.slotsPerDay} onChange={(e) => setSessionConfig((p) => ({ ...p, slotsPerDay: Number(e.target.value) || 1 }))} disabled={!canEdit} />
+            </div>
+            <div className="list-container mt-10">
+              {sessionConfig.timeWindows.map((window, idx) => (
+                <div key={`${window.startTime}-${idx}`} className="list-item">
+                  <span>Window {idx + 1}</span>
+                  <input value={window.startTime} disabled={!canEdit} onChange={(e) => setSessionConfig((p) => ({
+                    ...p,
+                    timeWindows: p.timeWindows.map((w, i) => i === idx ? { ...w, startTime: e.target.value } : w),
+                  }))} />
+                  <input value={window.endTime} disabled={!canEdit} onChange={(e) => setSessionConfig((p) => ({
+                    ...p,
+                    timeWindows: p.timeWindows.map((w, i) => i === idx ? { ...w, endTime: e.target.value } : w),
+                  }))} />
                 </div>
-                <p className="text-muted small">Start date drives slot generation and marks the existing timetable as stale.</p>
-              </div>
+              ))}
+            </div>
+          </article>
+
+          <ListBlock title="Exams" className="">
+            {canEdit ? (
               <div className="add-form">
-                <div className="input-group">
-                  <label>Exam Session Start Date:</label>
-                  <input 
-                    type="date" 
-                    value={startDateStr} 
-                    onChange={(e) => handleStartDateChange(e.target.value)}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="card glass-card span-full">
-              <div className="section-header">
-                <div>
-                  <span className="section-kicker">Workspace</span>
-                  <h3>Data Management</h3>
-                </div>
-                <p className="text-muted small">Autosaves to your browser and lets you export or restore the full workspace.</p>
-              </div>
-              <div className="action-row">
-                <button className="btn-secondary" onClick={handleExportBackup}>Export Backup</button>
-                <button className="btn-secondary" onClick={handleExportTimetableCsv} disabled={!timetable}>Export CSV</button>
-                <button className="btn-secondary" onClick={handleImportClick}>Import Backup</button>
-                <button className="btn-secondary" onClick={handleResetWorkspace}>Reset Demo Data</button>
-                <input
-                  ref={importInputRef}
-                  className="visually-hidden"
-                  type="file"
-                  accept="application/json"
-                  onChange={handleImportBackup}
-                  aria-label="Import Exam Cell backup"
-                />
-              </div>
-
-              <div className="profile-manager mt-10">
-                <div className="section-header compact">
-                  <div>
-                    <span className="section-kicker">Profiles</span>
-                    <h3>Named Workspace Snapshots</h3>
-                  </div>
-                </div>
-                <div className="add-form">
-                  <input
-                    value={profileName}
-                    onChange={(event) => setProfileName(event.target.value)}
-                    placeholder="Profile name (e.g. Midterm Plan A)"
-                    aria-label="Profile name"
-                  />
-                  <button className="btn-secondary" onClick={handleSaveProfile}>Save Profile</button>
-                </div>
-                {savedProfiles.length ? (
-                  <div className="list-container profile-list">
-                    {savedProfiles.map(profile => (
-                      <div key={profile.name} className="list-item">
-                        <div className="profile-meta">
-                          <strong>{profile.name}</strong>
-                          <span className="text-muted small">Updated {formatDateTime(profile.updatedAt)}</span>
-                        </div>
-                        <div className="item-actions">
-                          <button className="btn-secondary btn-small" onClick={() => handleLoadProfile(profile.name)}>Load</button>
-                          <button className="btn-secondary btn-small" onClick={() => handleDeleteProfile(profile.name)}>Delete</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-muted small">No saved profiles yet.</p>
-                )}
-              </div>
-            </div>
-
-            <div className="card glass-card span-full">
-              <div className="section-header">
-                <div>
-                  <span className="section-kicker">Ops</span>
-                  <h3>Activity Log</h3>
-                </div>
-                <button className="btn-secondary btn-small" onClick={handleClearAudit} disabled={!auditTrail.length}>Clear Log</button>
-              </div>
-              {auditTrail.length ? (
-                <div className="audit-log">
-                  {auditTrail.slice(0, 12).map(entry => (
-                    <article key={entry.id} className="audit-item">
-                      <div className="audit-meta">
-                        <strong>{entry.event}</strong>
-                        <span className="text-muted small">{formatDateTime(entry.timestamp)}</span>
-                      </div>
-                      <p>{entry.details}</p>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-muted small">Events will appear here as you update data, generate timetables, and manage profiles.</p>
-              )}
-            </div>
-
-            <div className="card glass-card">
-              <div className="section-header compact">
-                <div>
-                  <span className="section-kicker">Input</span>
-                  <h3>Exams ({filteredExams.length}/{exams.length})</h3>
-                </div>
-              </div>
-              <div className="add-form">
-                <input 
-                  value={newExamName} 
-                  onChange={(e) => setNewExamName(e.target.value)} 
-                  placeholder="Exam Name (e.g. Physics)"
-                />
-                <select value={newExamMarks} onChange={(e) => setNewExamMarks(e.target.value)} className="w-20">
-                  <option value={30}>30M</option>
-                  <option value={60}>60M</option>
-                </select>
+                <input placeholder="Exam name" value={newExam.name} onChange={(e) => setNewExam((p) => ({ ...p, name: e.target.value }))} />
+                <input type="number" placeholder="Marks" value={newExam.marks} onChange={(e) => setNewExam((p) => ({ ...p, marks: Number(e.target.value) || 30 }))} />
+                <input type="number" placeholder="Duration min" value={newExam.durationMinutes} onChange={(e) => setNewExam((p) => ({ ...p, durationMinutes: Number(e.target.value) || 120 }))} />
                 <button className="btn-secondary" onClick={addExam}>Add</button>
+                <button className="btn-secondary" onClick={() => setShowSyllabusUpload(true)}>📄 Upload Syllabus</button>
               </div>
-              <input
-                value={examSearch}
-                onChange={(e) => setExamSearch(e.target.value)}
-                placeholder="Search exams"
-                aria-label="Search exams"
-              />
-              <div className="list-container mt-10">
-                {filteredExams.map(e => (
-                  <div key={e.id} className="list-item">
-                    <span>{e.name}</span>
-                    <div className="item-actions">
-                      <span className="badge badge-success">{e.marks} Marks</span>
-                      <button className="btn-icon" onClick={() => removeExam(e.id)} aria-label={`Remove ${e.name}`}>×</button>
-                    </div>
+            ) : null}
+            <input
+              className="mt-10"
+              value={examFilter}
+              onChange={(event) => setExamFilter(event.target.value)}
+              placeholder="Filter exams by name or marks"
+            />
+            <div className="list-container mt-10">
+              {filteredExams.map((exam) => (
+                <div key={exam.id} className="list-item">
+                  <span>{exam.name} ({exam.marks}M, {exam.durationMinutes || 120}m)</span>
+                  <div className="item-actions">
+                    {canEdit ? <button className="btn-secondary btn-small" onClick={() => startEditExam(exam.id)}>Edit</button> : null}
+                    {canEdit ? <button className="btn-secondary btn-small" onClick={() => removeExam(exam.id)}>Delete</button> : null}
+                    {canEdit ? <button className="btn-secondary btn-small" onClick={() => clearPin(exam.id)}>Unpin</button> : null}
                   </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="card glass-card">
-              <div className="section-header compact">
-                <div>
-                  <span className="section-kicker">Capacity</span>
-                  <h3>Rooms ({filteredRooms.length}/{rooms.length})</h3>
                 </div>
-              </div>
+              ))}
+            </div>
+          </ListBlock>
+
+          <ListBlock title="Rooms" className="">
+            {canEdit ? (
               <div className="add-form">
-                <input 
-                  value={newRoomName} 
-                  onChange={(e) => setNewRoomName(e.target.value)} 
-                  placeholder="Room (e.g. Hall 1)"
-                />
-                <input 
-                  type="number" 
-                  value={newRoomCap} 
-                  onChange={(e) => setNewRoomCap(e.target.value)} 
-                  className="w-20"
-                />
+                <input placeholder="Room name" value={newRoom.name} onChange={(e) => setNewRoom((p) => ({ ...p, name: e.target.value }))} />
+                <input type="number" placeholder="Capacity" value={newRoom.capacity} onChange={(e) => setNewRoom((p) => ({ ...p, capacity: Number(e.target.value) || 35 }))} />
                 <button className="btn-secondary" onClick={addRoom}>Add</button>
               </div>
-              <input
-                value={roomSearch}
-                onChange={(e) => setRoomSearch(e.target.value)}
-                placeholder="Search rooms"
-                aria-label="Search rooms"
-              />
-              <div className="list-container mt-10">
-                {filteredRooms.map(r => (
-                  <div key={r.id} className="list-item">
-                    <span>{r.name}</span>
-                    <div className="item-actions">
-                      <span className="badge badge-success">Cap: {r.capacity}</span>
-                      <button className="btn-icon" onClick={() => removeRoom(r.id)} aria-label={`Remove ${r.name}`}>×</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="card glass-card span-full">
-              <div className="section-header">
-                <div>
-                  <span className="section-kicker">Rules</span>
-                  <h3>Constraint Builder</h3>
-                </div>
-                <p className="text-muted small">These controls shape the generated timetable and can be tuned without leaving the page.</p>
-              </div>
-              <div className="constraints-grid">
-                <label className="constraint-item">
-                  <span>Enforce Capacity</span>
-                  <input
-                    type="checkbox"
-                    checked={constraintConfig.checkCapacity}
-                    onChange={(e) => updateConstraint('checkCapacity', e.target.checked)}
-                  />
-                </label>
-                <label className="constraint-item">
-                  <span>Single Exam Per Day</span>
-                  <input
-                    type="checkbox"
-                    checked={constraintConfig.enforceSingleExamPerDay}
-                    onChange={(e) => updateConstraint('enforceSingleExamPerDay', e.target.checked)}
-                  />
-                </label>
-                <label className="constraint-item">
-                  <span>Prevent Same-Day Student Clash</span>
-                  <input
-                    type="checkbox"
-                    checked={constraintConfig.preventSameDayStudentConflict}
-                    onChange={(e) => updateConstraint('preventSameDayStudentConflict', e.target.checked)}
-                  />
-                </label>
-                <label className="constraint-item">
-                  <span>Global Minimum Gap (days)</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={7}
-                    value={constraintConfig.minGapDays}
-                    onChange={(e) => updateConstraint('minGapDays', parseInt(e.target.value || '2', 10))}
-                  />
-                </label>
-                <label className="constraint-item">
-                  <span>Friday/Saturday Special Gap</span>
-                  <input
-                    type="checkbox"
-                    checked={constraintConfig.enforceFridaySaturdayRule}
-                    onChange={(e) => updateConstraint('enforceFridaySaturdayRule', e.target.checked)}
-                  />
-                </label>
-                <label className="constraint-item">
-                  <span>Friday/Saturday Gap (days)</span>
-                  <input
-                    type="number"
-                    min={2}
-                    max={7}
-                    value={constraintConfig.fridaySaturdayMinGap}
-                    onChange={(e) => updateConstraint('fridaySaturdayMinGap', parseInt(e.target.value || '3', 10))}
-                  />
-                </label>
-                <label className="constraint-item">
-                  <span>60-Mark Extra Gap</span>
-                  <input
-                    type="checkbox"
-                    checked={constraintConfig.enforceSixtyMarkGap}
-                    onChange={(e) => updateConstraint('enforceSixtyMarkGap', e.target.checked)}
-                  />
-                </label>
-                <label className="constraint-item">
-                  <span>60-Mark Gap (days)</span>
-                  <input
-                    type="number"
-                    min={2}
-                    max={7}
-                    value={constraintConfig.sixtyMarkMinGap}
-                    onChange={(e) => updateConstraint('sixtyMarkMinGap', parseInt(e.target.value || '3', 10))}
-                  />
-                </label>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {activeTab === 'calendar' && (
-          <section className="calendar-section">
-            <CalendarGrid 
-              holidays={holidays}
-              onToggleHoliday={toggleHoliday}
-              timetable={timetable}
-              currentMonth={currentMonth}
-              setCurrentMonth={setCurrentMonth}
+            ) : null}
+            <input
+              className="mt-10"
+              value={roomFilter}
+              onChange={(event) => setRoomFilter(event.target.value)}
+              placeholder="Filter rooms by name or capacity"
             />
-          </section>
-        )}
-
-        {activeTab === 'output' && (
-
-          <section className="output-section">
-            {error ? (
-              <div className="error-card glass-card">
-                <p>{error}</p>
-                <button className="btn-secondary mt-10" onClick={() => setActiveTab('input')}>Adjust Constraints</button>
-              </div>
-            ) : timetable ? (
-              <div>
-                <div className="section-header output-header">
-                  <div>
-                    <span className="section-kicker">Result</span>
-                    <h3>Generated timetable</h3>
-                  </div>
-                  <div className="output-actions">
-                    <button className="btn-secondary" onClick={handleExportBackup}>Export Backup</button>
-                    <button className="btn-secondary" onClick={handleExportTimetableCsv}>Export CSV</button>
+            <div className="list-container mt-10">
+              {filteredRooms.map((room) => (
+                <div key={room.id} className="list-item">
+                  <span>{room.name} (Cap {room.capacity})</span>
+                  <div className="item-actions">
+                    {canEdit ? <button className="btn-secondary btn-small" onClick={() => startEditRoom(room.id)}>Edit</button> : null}
+                    {canEdit ? <button className="btn-secondary btn-small" onClick={() => removeRoom(room.id)}>Delete</button> : null}
                   </div>
                 </div>
+              ))}
+            </div>
+          </ListBlock>
 
-                <div className={`status-card glass-card ${timetableConflicts.length ? 'status-fail' : 'status-pass'}`}>
-                  <h3>{timetableConflicts.length ? 'Conflict Detection: Issues Found' : 'Conflict Detection: Passed'}</h3>
-                  <p>
-                    {timetableConflicts.length
-                      ? `${timetableConflicts.length} conflict checks failed. Tighten constraints or increase slots/rooms.`
-                      : 'No room overlap, no capacity shortage, and no configured rule violations found.'}
-                  </p>
-                </div>
+          <article className="card glass-card span-full">
+            <h3>Roster CSV (exam,student)</h3>
+            <textarea value={rosterCsv} onChange={(e) => setRosterCsv(e.target.value)} rows={4} placeholder="exam,student" />
+            <div className="action-row">
+              {canEdit ? <button className="btn-secondary" onClick={importRosterCsv}>Import CSV</button> : null}
+              <button className="btn-secondary" onClick={exportRosterCsv}>Export CSV</button>
+            </div>
+          </article>
 
-                <div className="grid-container glass-card mt-10">
-                <table className="timetable-table">
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Time & Duration</th>
-                      <th>Rooms</th>
-                      <th>Exam</th>
-                      <th>Marks</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {timetable.map((item, idx) => (
-                      <tr key={idx} className="fade-in" style={{ animationDelay: `${idx * 0.1}s` }}>
-                        <td>
-                          <div className="slot-pill">
-                            <strong>{item.slot.name}</strong>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="time-info">
-                            <strong>{item.startTime} - {item.endTime}</strong>
-                            <span>({item.duration})</span>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="rooms-cell">
-                            <span className="rooms-title">{`Rooms (${item.rooms.length})`}</span>
-                            <div className="room-chip-list">
-                              {item.rooms.map(room => (
-                                <span key={room.id} className="room-chip">{room.name}</span>
-                              ))}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="exam-name">{item.exam.name}</td>
-                        <td>
-                          <span className="badge badge-success">{item.exam.marks}</span>
-                          <div className="capacity-meta">{`Seat Use: ${item.exam.students.length}/${item.totalCapacity}`}</div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <article className="card glass-card span-full">
+            <h3>Manual Pin / Lock</h3>
+            <p>Lock an exam into a fixed slot and optionally locked room set before generating.</p>
+            <div className="list-container mt-10">
+              {exams.map((exam) => (
+                <PinLockEntry
+                  key={`pin-${exam.id}`}
+                  exam={exam}
+                  slots={slots}
+                  rooms={rooms}
+                  lockedAssignments={lockedAssignments}
+                  canEdit={canEdit}
+                  onPin={pinExam}
+                  onClearPin={clearPin}
+                  onSelectAllRooms={selectAllPinnedRooms}
+                  onClearRooms={clearAllPinnedRooms}
+                  onToggleRoom={(examId, roomId, checked) => {
+                    const current = lockedAssignments.find((i) => i.examId === examId);
+                    const selected = current?.roomIds || [];
+                    const next = checked ? [...selected, roomId] : selected.filter((id) => id !== roomId);
+                    setPinnedRooms(examId, next);
+                  }}
+                />
+              ))}
+            </div>
+          </article>
+
+          <article className="card glass-card span-full">
+            <h3>Constraint Config</h3>
+            <div className="constraints-grid">
+              {Object.keys(DEFAULT_CONSTRAINTS).map((key) => {
+                const value = constraintConfig[key];
+                if (typeof value === 'boolean') {
+                  return (
+                    <label key={key} className="constraint-item">
+                      <span>{key}</span>
+                      <input type="checkbox" checked={Boolean(value)} disabled={!canEdit} onChange={(e) => setConstraintConfig((p) => ({ ...p, [key]: e.target.checked }))} />
+                    </label>
+                  );
+                }
+
+                return (
+                  <label key={key} className="constraint-item">
+                    <span>{key}</span>
+                    <input type="number" value={value} disabled={!canEdit} onChange={(e) => setConstraintConfig((p) => ({ ...p, [key]: Number(e.target.value) || p[key] }))} />
+                  </label>
+                );
+              })}
+            </div>
+          </article>
+        </section>
+
+        <section className="output-section">
+          <div className="section-header output-header">
+            <h3>Timetable + Seat Allotment Reports</h3>
+            <div className="output-actions">
+              <button className="btn-secondary" onClick={exportTimetableCsv}>Export Timetable CSV</button>
+              <button className="btn-secondary" onClick={exportSeatPlanCsv}>Export Seatplan CSV</button>
+            </div>
+          </div>
+
+          <div className="grid-container glass-card mt-10">
+            <table className="timetable-table">
+              <thead>
+                <tr>
+                  <th>Slot</th>
+                  <th>Exam</th>
+                  <th>Rooms</th>
+                  <th>Students</th>
+                </tr>
+              </thead>
+              <tbody>
+                {timetable.map((item) => (
+                  <tr key={`${item.slot.id}-${item.exam.id}`}>
+                    <td>{item.slot.name}</td>
+                    <td>{item.exam.name}</td>
+                    <td>{(item.rooms || []).map((room) => room.name).join(' | ')}</td>
+                    <td>{item.exam.students.length}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="status-card glass-card mt-10">
+            <h3>Constraint Failure Trace</h3>
+            <div className="list-container mt-10">
+              {trace.slice(-10).reverse().map((item, idx) => (
+                <div className="list-item" key={`${item.reason}-${idx}`}>
+                  <span>{item.examName} @ {item.slotName} - {item.reason}</span>
+                  <span className="badge badge-warning">{suggestionByReason[item.reason] || 'Try adding slots, rooms, or relaxing constraints.'}</span>
                 </div>
-              </div>
-            ) : (
-              <div className="empty-state">
-                <p>Run the engine to see results.</p>
-              </div>
-            )}
-          </section>
-        )}
+              ))}
+            </div>
+          </div>
+
+          <ListBlock title="Room-wise Report" className="status-card mt-10">
+            <div className="list-container mt-10">
+              {Object.entries(reports.roomWise || {}).map(([roomName, entries]) => (
+                <div key={roomName} className="list-item">
+                  <strong>{roomName}</strong>
+                  <span>{entries.length} seat allocations</span>
+                </div>
+              ))}
+            </div>
+          </ListBlock>
+
+          <ListBlock title="Student-wise Report" className="status-card mt-10">
+            <div className="add-form mt-10">
+              <input
+                value={studentReportQuery}
+                onChange={(e) => {
+                  setStudentReportQuery(e.target.value);
+                  setStudentReportPage(1);
+                }}
+                placeholder="Filter by student, exam, or room"
+              />
+              <select
+                value={studentReportSort}
+                onChange={(e) => {
+                  setStudentReportSort(e.target.value);
+                  setStudentReportPage(1);
+                }}
+              >
+                <option value="student-asc">Sort: Student A-Z</option>
+                <option value="room">Sort: Room</option>
+                <option value="exam-count">Sort: Exam Count</option>
+              </select>
+              <span className="badge">{studentReportRows.totalRows} matched</span>
+            </div>
+            <div className="list-container mt-10">
+              {studentReportRows.rows.map(([student, entries]) => (
+                <div key={student} className="list-item">
+                  <strong>{student}</strong>
+                  <span>{entries.map((entry) => `${entry.examName} (${entry.roomName})`).join('; ')}</span>
+                </div>
+              ))}
+            </div>
+            <div className="action-row mt-10">
+              <button
+                className="btn-secondary btn-small"
+                disabled={studentReportRows.currentPage <= 1}
+                onClick={() => setStudentReportPage((p) => Math.max(1, p - 1))}
+              >
+                Prev
+              </button>
+              <span className="badge">Page {studentReportRows.currentPage} / {studentReportRows.totalPages}</span>
+              <button
+                className="btn-secondary btn-small"
+                disabled={studentReportRows.currentPage >= studentReportRows.totalPages}
+                onClick={() => setStudentReportPage((p) => Math.min(studentReportRows.totalPages, p + 1))}
+              >
+                Next
+              </button>
+            </div>
+          </ListBlock>
+        </section>
+
+        {examEditDraft ? (
+          <ModalDialog
+            title="Edit Exam"
+            size="sm"
+            onCancel={() => setExamEditDraft(null)}
+            onConfirm={saveExamEdit}
+            confirmLabel="Save Exam"
+          >
+            <div className="add-form">
+              <label>Name</label>
+              <input value={examEditDraft.name} onChange={(e) => setExamEditDraft((p) => ({ ...p, name: e.target.value }))} />
+              <label>Marks</label>
+              <input type="number" value={examEditDraft.marks} onChange={(e) => setExamEditDraft((p) => ({ ...p, marks: Number(e.target.value) || 30 }))} />
+              <label>Duration (min)</label>
+              <input type="number" value={examEditDraft.durationMinutes} onChange={(e) => setExamEditDraft((p) => ({ ...p, durationMinutes: Number(e.target.value) || 120 }))} />
+            </div>
+          </ModalDialog>
+        ) : null}
+
+        {roomEditDraft ? (
+          <ModalDialog
+            title="Edit Room"
+            size="sm"
+            onCancel={() => setRoomEditDraft(null)}
+            onConfirm={saveRoomEdit}
+            confirmLabel="Save Room"
+          >
+            <div className="add-form">
+              <label>Name</label>
+              <input value={roomEditDraft.name} onChange={(e) => setRoomEditDraft((p) => ({ ...p, name: e.target.value }))} />
+              <label>Capacity</label>
+              <input type="number" value={roomEditDraft.capacity} onChange={(e) => setRoomEditDraft((p) => ({ ...p, capacity: Number(e.target.value) || 1 }))} />
+            </div>
+          </ModalDialog>
+        ) : null}
+
+        {showSyllabusUpload ? (
+          <ModalDialog
+            title=""
+            size="md"
+            onCancel={() => setShowSyllabusUpload(false)}
+            hideActions
+          >
+            <SyllabusUpload
+              onDetailsExtracted={handleSyllabusDetailsExtracted}
+              onCancel={() => setShowSyllabusUpload(false)}
+            />
+          </ModalDialog>
+        ) : null}
       </main>
     </div>
   );
